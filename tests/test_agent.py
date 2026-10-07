@@ -5,9 +5,9 @@ from pathlib import Path
 
 from helpers import ScriptedLLM, call, make_agent, tool_results
 
-from researchos.agent import RunStatus
 from researchos.llm import LLMAuthorizationError, LLMUnavailableError, Message, MockLLM
-from researchos.tools import untrusted
+from researchos.state import RunStatus
+from researchos.untrusted import untrusted
 
 MOCK_URL = "https://mock.researchos.invalid/test%20topic/1"
 
@@ -22,7 +22,7 @@ def test_mock_model_completes_full_research_loop(tmp_path: Path) -> None:
     assert project.notes()[0].source_ids == [project.sources()[0].id]
     assert "## Summary" in result.report_path.read_text()
     events = [json.loads(line) for line in project.events_path.read_text().splitlines()]
-    assert [e["event"] for e in events].count("llm_call") == 4
+    assert [e["event"] for e in events].count("llm_call") == 5
     assert events[-1]["event"] == "run_end"
 
 

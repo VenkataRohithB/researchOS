@@ -11,10 +11,11 @@ from contextlib import closing
 
 from pydantic import ValidationError
 
-from researchos.agent import ResearchAgent, RunResult, RunStatus
+from researchos.agent import ResearchAgent, RunResult
 from researchos.config import Settings
 from researchos.llm import create_llm_client
-from researchos.project import Project, ResearchRequest
+from researchos.project import Project, ProjectLockedError, ProjectNotFoundError, ResearchRequest
+from researchos.state import RunStatus
 from researchos.tools import ToolRegistry, build_research_tools
 from researchos.usage import Limits, Pricing, UsageMeter
 from researchos.web import create_fetcher, create_search_provider
@@ -23,7 +24,8 @@ logger = logging.getLogger("researchos")
 
 EXIT_OK = 0
 EXIT_INCOMPLETE = 1
-EXIT_CONFIG_ERROR = 2
+EXIT_USAGE_ERROR = 2
+EXIT_INTERRUPTED = 130
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -37,22 +39,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = Settings()
     except ValidationError as exc:
         print(f"Configuration error:\n{exc}", file=sys.stderr)
-        return EXIT_CONFIG_ERROR
+        return EXIT_USAGE_ERROR
 
-    request = ResearchRequest(topic=args.topic, goal=args.goal, knowledge_level=args.level)
-    result = run_research(settings, request)
-    _print_result(result)
-    return EXIT_OK if result.status is RunStatus.COMPLETED else EXIT_INCOMPLETE
+    try:
+        if args.command == "new":
+            request = ResearchRequest(topic=args.topic, goal=args.goal, knowledge_level=args.level)
+            project = Project.create(settings.workspace_dir, request)
+            print(f"Project: {project.metadata.id}")
+            return _run(settings, project)
+        if args.command == "list":
+            return _list(settings)
+
+        project = Project.open(settings.workspace_dir, args.project)
+        if args.command == "resume":
+            if args.instruction:
+                project.add_directive(args.instruction)
+            return _run(settings, project)
+        if args.command == "steer":
+            project.add_directive(args.instruction)
+            print("Instruction recorded. A running agent sees it on its next step;")
+            print(f"otherwise run: researchos resume {project.metadata.id}")
+            return EXIT_OK
+        return _status(project)
+    except (ProjectNotFoundError, ProjectLockedError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_USAGE_ERROR
+    except KeyboardInterrupt:
+        print("\nInterrupted. Progress is saved; continue with: researchos resume <project>")
+        return EXIT_INTERRUPTED
 
 
-def run_research(settings: Settings, request: ResearchRequest) -> RunResult:
+def run_research(settings: Settings, project: Project) -> RunResult:
     if settings.llm_provider == "mock":
         logger.warning("LLM_PROVIDER=mock: using the offline mock model; no real research")
     if settings.search_provider == "mock":
         logger.warning("SEARCH_PROVIDER=mock: using synthetic search results")
 
-    project = Project.create(settings.workspace_dir, request)
-    logger.info("project: %s", project.root)
+    run_id = uuid.uuid4().hex
     meter = UsageMeter(
         limits=Limits(
             max_steps=settings.max_steps,
@@ -64,30 +87,26 @@ def run_research(settings: Settings, request: ResearchRequest) -> RunResult:
             output_per_million=settings.llm_price_out,
         ),
         events_path=project.events_path,
-        run_id=uuid.uuid4().hex,
+        run_id=run_id,
     )
     with (
         closing(create_llm_client(settings)) as llm,
         closing(create_search_provider(settings)) as search,
         closing(create_fetcher(settings)) as fetcher,
     ):
-        tools = ToolRegistry(build_research_tools(project, search, fetcher))
-        agent = ResearchAgent(llm=llm, tools=tools, meter=meter, project=project)
+        agent = ResearchAgent(
+            llm=llm,
+            tools=ToolRegistry(build_research_tools(project, search, fetcher)),
+            meter=meter,
+            project=project,
+            run_id=run_id,
+            context_turns=settings.context_turns,
+        )
         return agent.run()
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="researchos", description="Autonomously research a topic."
-    )
-    parser.add_argument("topic", help='what to research, e.g. "how RAG systems work"')
-    parser.add_argument("--goal", help="what you want to be able to do or understand")
-    parser.add_argument("--level", help="your current knowledge of the topic")
-    parser.add_argument("-q", "--quiet", action="store_true", help="only print the result")
-    return parser
-
-
-def _print_result(result: RunResult) -> None:
+def _run(settings: Settings, project: Project) -> int:
+    result = run_research(settings, project)
     usage = result.usage
     print(
         f"\nStatus:  {result.status.value} ({result.reason})\n"
@@ -97,3 +116,69 @@ def _print_result(result: RunResult) -> None:
         f"{usage.input_tokens + usage.output_tokens} tokens, "
         f"${usage.cost_usd:.4f}, {usage.elapsed_seconds:.1f}s"
     )
+    if result.status is not RunStatus.COMPLETED:
+        print(f"Resume:  researchos resume {project.metadata.id}")
+        return EXIT_INCOMPLETE
+    return EXIT_OK
+
+
+def _status(project: Project) -> int:
+    state = project.state
+    request = project.metadata.request
+    runs = state.runs
+    cost = sum(r.usage.cost_usd for r in runs if r.usage)
+    tokens = sum(r.usage.input_tokens + r.usage.output_tokens for r in runs if r.usage)
+    print(f"Project:  {project.metadata.id}")
+    print(f"Topic:    {request.topic}")
+    print(f"Status:   {state.status.value if state.status else 'not started'}")
+    print(f"Phase:    {state.phase.value}")
+    print(
+        f"Progress: {state.step} steps over {len(runs)} run(s), {len(project.sources())} sources,"
+    )
+    print(f"          {len(project.notes())} notes, {tokens} tokens, ${cost:.4f}")
+    if state.agenda:
+        print("Agenda:")
+        for item in state.agenda:
+            print(f"  {item.id} [{item.status}] {item.text}")
+    directives = project.directives()
+    if directives:
+        print("Instructions:")
+        for directive in directives:
+            print(f"  - {directive.text}")
+    return EXIT_OK
+
+
+def _list(settings: Settings) -> int:
+    ids = Project.list_ids(settings.workspace_dir)
+    if not ids:
+        print(f"No research projects in {settings.workspace_dir}")
+    for project_id in ids:
+        project = Project.open(settings.workspace_dir, project_id)
+        status = project.state.status
+        print(f"{project_id}  [{status.value if status else 'not started'}]")
+    return EXIT_OK
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="researchos", description="Autonomous research agent.")
+    parser.add_argument("-q", "--quiet", action="store_true", help="only print results")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    new = commands.add_parser("new", help="start researching a new topic")
+    new.add_argument("topic", help='what to research, e.g. "how RAG systems work"')
+    new.add_argument("--goal", help="what you want to be able to do or understand")
+    new.add_argument("--level", help="your current knowledge of the topic")
+
+    resume = commands.add_parser("resume", help="continue an existing project")
+    resume.add_argument("project", help="project id or path")
+    resume.add_argument("instruction", nargs="?", help="optional instruction for this run")
+
+    steer = commands.add_parser("steer", help="give an instruction to a project's agent")
+    steer.add_argument("project", help="project id or path")
+    steer.add_argument("instruction", help='e.g. "go deeper on the memory architecture"')
+
+    status = commands.add_parser("status", help="show a project's state")
+    status.add_argument("project", help="project id or path")
+
+    commands.add_parser("list", help="list research projects")
+    return parser

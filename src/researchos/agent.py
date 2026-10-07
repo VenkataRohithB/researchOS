@@ -1,9 +1,13 @@
 """The research agent loop.
 
-Each step the model sees the conversation so far and either calls tools or replies in text.
-The harness executes the calls it chose, appends the observations and repeats until the model
-calls a terminal tool, stalls, fails, or a budget limit is reached. The order of actions is
-decided entirely by the model.
+Each step the model receives a fresh context built from the project's state (see
+`researchos.context`) and either calls tools or replies in text. The harness executes the calls
+it chose, records the turn, and persists state, then repeats until the model calls a terminal
+tool, stalls, fails, or a budget limit is reached. The order of actions is decided entirely by
+the model.
+
+State is saved after every step, so a run that is interrupted (Ctrl-C, crash, budget) can be
+resumed later from where it stopped.
 """
 
 from __future__ import annotations
@@ -11,34 +15,18 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from enum import StrEnum
-from importlib import resources
 from pathlib import Path
 
-from researchos.llm import (
-    LLMAuthorizationError,
-    LLMClient,
-    LLMError,
-    LLMResponse,
-    Message,
-    ToolSpec,
-)
-from researchos.project import Project, ResearchRequest
+from researchos.context import Transcript, Turn, build_messages
+from researchos.llm import LLMAuthorizationError, LLMClient, LLMError, LLMResponse, Message
+from researchos.project import Project
+from researchos.state import RunStatus
 from researchos.tools import ToolRegistry
 from researchos.usage import BudgetExceeded, UsageMeter, UsageSummary
 
 logger = logging.getLogger(__name__)
 
 NUDGE = "Continue the research by calling a tool. If the objective is met, call finish_research."
-
-
-class RunStatus(StrEnum):
-    COMPLETED = "completed"
-    BUDGET_EXHAUSTED = "budget_exhausted"
-    STALLED = "stalled"
-    LLM_REFUSED = "llm_refused"
-    LLM_FAILED = "llm_failed"
 
 
 @dataclass(frozen=True)
@@ -57,47 +45,71 @@ class ResearchAgent:
         tools: ToolRegistry,
         meter: UsageMeter,
         project: Project,
+        run_id: str,
+        context_turns: int = 6,
         max_idle_turns: int = 2,
     ) -> None:
         self._llm = llm
         self._tools = tools
         self._meter = meter
         self._project = project
+        self._run_id = run_id
+        self._context_turns = context_turns
         self._max_idle_turns = max_idle_turns
+        self._transcript = Transcript(project.transcript_path)
 
     def run(self) -> RunResult:
-        messages = [
-            Message(role="system", content=system_prompt()),
-            Message(role="user", content=_describe_request(self._project.metadata.request)),
-        ]
-        specs = self._tools.specs()
+        """Run until the research ends. Raises `ProjectLockedError` if another process is
+        already running this project. On Ctrl-C the run is recorded as interrupted and
+        `KeyboardInterrupt` propagates."""
+        with self._project.lock():
+            self._project.state.begin_run(self._run_id)
+            self._project.save_state()
+            try:
+                status, reason = self._loop()
+            except KeyboardInterrupt:
+                self._end(RunStatus.INTERRUPTED, "interrupted by user")
+                raise
+            return self._end(status, reason)
+
+    def _loop(self) -> tuple[RunStatus, str]:
+        state = self._project.state
         idle_turns = 0
 
         while True:
             try:
-                step = self._meter.start_step()
+                self._meter.start_step()
             except BudgetExceeded as exc:
-                return self._end(RunStatus.BUDGET_EXHAUSTED, str(exc))
+                return RunStatus.BUDGET_EXHAUSTED, str(exc)
+            state.step += 1
+            step = state.step
 
+            messages = build_messages(
+                self._project,
+                self._transcript,
+                context_turns=self._context_turns,
+                usage=self._meter.summary(),
+                limits=self._meter.limits,
+            )
             try:
-                response = self._chat(messages, specs)
+                response = self._chat(messages)
             except LLMAuthorizationError as exc:
-                return self._end(RunStatus.LLM_REFUSED, str(exc))
+                return RunStatus.LLM_REFUSED, str(exc)
             except LLMError as exc:
-                return self._end(RunStatus.LLM_FAILED, str(exc))
+                return RunStatus.LLM_FAILED, str(exc)
 
             reply = response.message
-            messages.append(reply)
+            turn: list[Message] = [reply]
             if reply.content:
                 logger.info("step %d: model: %s", step, _clip(reply.content, 300))
 
             if not reply.tool_calls:
                 idle_turns += 1
                 if idle_turns > self._max_idle_turns:
-                    return self._end(
-                        RunStatus.STALLED, f"no tool call in {idle_turns} consecutive turns"
-                    )
-                messages.append(Message(role="user", content=NUDGE))
+                    self._record(step, turn)
+                    return RunStatus.STALLED, f"no tool call in {idle_turns} consecutive turns"
+                turn.append(Message(role="user", content=NUDGE))
+                self._record(step, turn)
                 continue
             idle_turns = 0
 
@@ -111,15 +123,16 @@ class ResearchAgent:
                 )
                 if not outcome.ok:
                     logger.info("step %d: %s failed: %s", step, call.name, outcome.content)
-                messages.append(Message(role="tool", content=outcome.content, tool_call_id=call.id))
+                turn.append(Message(role="tool", content=outcome.content, tool_call_id=call.id))
                 finished = finished or outcome.terminal
+            self._record(step, turn)
             if finished:
-                return self._end(RunStatus.COMPLETED, "the agent finished the research")
+                return RunStatus.COMPLETED, "the agent finished the research"
 
-    def _chat(self, messages: list[Message], specs: list[ToolSpec]) -> LLMResponse:
+    def _chat(self, messages: list[Message]) -> LLMResponse:
         started = time.monotonic()
         try:
-            response = self._llm.chat(messages, specs)
+            response = self._llm.chat(messages, self._tools.specs())
         except LLMError as exc:
             self._meter.record_llm_failure(
                 model=self._llm.model, error=str(exc), latency_seconds=time.monotonic() - started
@@ -132,31 +145,24 @@ class ResearchAgent:
         )
         return response
 
+    def _record(self, step: int, messages: list[Message]) -> None:
+        self._transcript.append(Turn(step=step, messages=tuple(messages)))
+        self._project.state.runs[-1].usage = self._meter.summary()
+        self._project.save_state()
+
     def _end(self, status: RunStatus, reason: str) -> RunResult:
+        usage = self._meter.summary()
+        self._project.state.end_run(status, reason, usage)
+        self._project.save_state()
         if status is not RunStatus.COMPLETED:
-            self._project.write_report(status=f"{status.value}: {reason}", summary=None)
+            self._project.write_report(
+                status=f"{status.value}: {reason}", summary=self._project.state.summary
+            )
         self._meter.record_run_end(status=status.value, reason=reason)
         logger.info("run ended: %s (%s)", status.value, reason)
         return RunResult(
-            status=status,
-            reason=reason,
-            report_path=self._project.report_path,
-            usage=self._meter.summary(),
+            status=status, reason=reason, report_path=self._project.report_path, usage=usage
         )
-
-
-def system_prompt(today: datetime | None = None) -> str:
-    template = resources.files("researchos.prompts").joinpath("system.md").read_text("utf-8")
-    return template.replace("{today}", f"{today or datetime.now(UTC):%Y-%m-%d}")
-
-
-def _describe_request(request: ResearchRequest) -> str:
-    lines = [f"Topic: {request.topic}"]
-    if request.goal:
-        lines.append(f"Goal: {request.goal}")
-    if request.knowledge_level:
-        lines.append(f"My current knowledge: {request.knowledge_level}")
-    return "\n".join(lines)
 
 
 def _clip(text: str, limit: int) -> str:

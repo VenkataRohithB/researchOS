@@ -1,8 +1,8 @@
 """Offline stand-in for a real model.
 
-`MockLLM` does not reason. It follows a fixed search -> fetch -> note -> finish trajectory,
-reading the previous tool results so it exercises the real harness end to end (tool
-validation, persistence, budget accounting) without credentials or network access.
+`MockLLM` does not reason. It follows a fixed plan -> search -> fetch -> note -> finish
+trajectory, reading the previous tool results so it exercises the real harness end to end
+(tool validation, persistence, budget accounting) without credentials or network access.
 """
 
 from __future__ import annotations
@@ -26,11 +26,14 @@ class MockLLM:
     def chat(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> LLMResponse:
         called = {call.name for m in messages if m.role == "assistant" for call in m.tool_calls}
         last_result = _last_tool_result(messages)
+        topic = _topic(messages)
 
         if last_result is not None and "error" in last_result:
             message = self._call("finish_research", summary="Stopped: a tool reported an error.")
+        elif "update_agenda" not in called:
+            message = self._call("update_agenda", add=[f"Understand the basics of {topic}"])
         elif "search_web" not in called:
-            message = self._call("search_web", query=_topic(messages), max_results=3)
+            message = self._call("search_web", query=topic, max_results=3)
         elif "fetch_source" not in called:
             results = (last_result or {}).get("results") or []
             if not results:
@@ -38,16 +41,14 @@ class MockLLM:
             else:
                 message = self._call("fetch_source", url=results[0]["url"])
         elif "save_note" not in called:
-            source = last_result or {}
+            source_id = (last_result or {}).get("source_id")
             message = self._call(
                 "save_note",
-                text=f"Key points from '{source.get('title', 'source')}'.",
-                source_ids=[source["source_id"]] if "source_id" in source else [],
+                text=f"Key points about {topic}.",
+                source_ids=[source_id] if source_id else [],
             )
         else:
-            message = self._call(
-                "finish_research", summary=f"Mock research on '{_topic(messages)}' complete."
-            )
+            message = self._call("finish_research", summary=f"Mock research on '{topic}' complete.")
 
         return LLMResponse(
             message=message, usage=_estimate_usage(messages, message), model=self.model

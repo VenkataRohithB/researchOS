@@ -4,6 +4,9 @@ Layout::
 
     <workspace>/<project-id>/
         metadata/project.json   request that started the project
+        metadata/state.json     task state: phase, agenda, runs (see `researchos.state`)
+        metadata/transcript.jsonl  every agent step: model reply and tool results
+        metadata/directives.jsonl  instructions from the user, added at any time
         metadata/events.jsonl   every LLM and tool call, with usage
         sources/sources.json    registry of fetched sources
         sources/snapshots/      extracted text of each source, as fetched
@@ -13,15 +16,19 @@ Layout::
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from researchos.state import ResearchState
 from researchos.web import FetchedPage
 
 
@@ -53,7 +60,20 @@ class Note(BaseModel):
     created_at: datetime
 
 
+class Directive(BaseModel):
+    text: str
+    created_at: datetime
+
+
 class UnknownSourceError(KeyError):
+    pass
+
+
+class ProjectNotFoundError(LookupError):
+    pass
+
+
+class ProjectLockedError(RuntimeError):
     pass
 
 
@@ -67,6 +87,23 @@ class Project:
             s["id"]: Source.model_validate(s)
             for s in json.loads(self._sources_path.read_text(encoding="utf-8"))
         }
+        self.state = ResearchState.model_validate_json(self._state_path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def open(cls, workspace_dir: Path, ref: str) -> Project:
+        """Open a project by id (a directory in the workspace) or by path."""
+        for candidate in (workspace_dir / ref, Path(ref)):
+            if (candidate / "metadata" / "project.json").is_file():
+                return cls(candidate)
+        raise ProjectNotFoundError(f"no research project '{ref}' in {workspace_dir}")
+
+    @staticmethod
+    def list_ids(workspace_dir: Path) -> list[str]:
+        if not workspace_dir.is_dir():
+            return []
+        return sorted(
+            p.name for p in workspace_dir.iterdir() if (p / "metadata" / "project.json").is_file()
+        )
 
     @classmethod
     def create(cls, workspace_dir: Path, request: ResearchRequest) -> Project:
@@ -78,9 +115,41 @@ class Project:
             (root / sub).mkdir(parents=True)
         metadata = ProjectMetadata(id=project_id, created_at=created_at, request=request)
         _atomic_write(root / "metadata" / "project.json", metadata.model_dump_json(indent=2))
+        _atomic_write(root / "metadata" / "state.json", ResearchState().model_dump_json(indent=2))
         _atomic_write(root / "sources" / "sources.json", "[]")
         (root / "notes" / "notes.jsonl").touch()
         return cls(root)
+
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """Hold an exclusive lock so only one process runs the agent on this project.
+        The OS releases it if the process dies, so a crash never leaves a stale lock."""
+        with (self.root / "metadata" / ".lock").open("w") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ProjectLockedError(
+                    f"project {self.metadata.id} is already being researched by another process"
+                ) from None
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def save_state(self) -> None:
+        _atomic_write(self._state_path, self.state.model_dump_json(indent=2))
+
+    @property
+    def transcript_path(self) -> Path:
+        return self.root / "metadata" / "transcript.jsonl"
+
+    @property
+    def _state_path(self) -> Path:
+        return self.root / "metadata" / "state.json"
+
+    @property
+    def _directives_path(self) -> Path:
+        return self.root / "metadata" / "directives.jsonl"
 
     @property
     def events_path(self) -> Path:
@@ -153,6 +222,23 @@ class Project:
         lines = self._notes_path.read_text(encoding="utf-8").splitlines()
         return [Note.model_validate_json(line) for line in lines if line.strip()]
 
+    # Directives ----------------------------------------------------------------------
+
+    def add_directive(self, text: str) -> Directive:
+        """Append a user instruction. Safe while a run is in progress: the file is
+        append-only and the agent re-reads it every step."""
+        directive = Directive(text=text, created_at=datetime.now(UTC))
+        with self._directives_path.open("a", encoding="utf-8") as f:
+            f.write(directive.model_dump_json() + "\n")
+        return directive
+
+    def directives(self) -> list[Directive]:
+        if not self._directives_path.exists():
+            return []
+        # A line without its trailing newline is still being appended by another process.
+        complete = self._directives_path.read_text(encoding="utf-8").split("\n")[:-1]
+        return [Directive.model_validate_json(line) for line in complete if line.strip()]
+
     # Output --------------------------------------------------------------------------
 
     def write_report(self, *, status: str, summary: str | None) -> Path:
@@ -160,6 +246,10 @@ class Project:
         lines = [f"# {request.topic}", "", f"*Status: {status}*", ""]
         if summary:
             lines += ["## Summary", "", summary, ""]
+        if self.state.agenda:
+            lines += ["## Agenda", ""]
+            lines += [f"- [{item.status}] {item.text}" for item in self.state.agenda]
+            lines.append("")
         lines += ["## Notes", ""]
         notes = self.notes()
         lines += [_format_note(note) for note in notes] or ["*No notes were recorded.*"]

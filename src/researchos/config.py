@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     max_steps: int = Field(default=150, gt=0)
     max_cost_usd: float = Field(default=5.0, gt=0)
     max_wall_seconds: float = Field(default=3600.0, gt=0)
+    context_turns: int = Field(default=6, ge=1, description="Recent turns shown to the model")
 
     workspace_dir: Path = Path("workspace")
 

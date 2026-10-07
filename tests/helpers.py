@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from researchos.agent import ResearchAgent
-from researchos.llm import LLMClient, LLMError, LLMResponse, Message, ToolCall, ToolSpec, Usage
+from researchos.llm import LLMClient, LLMResponse, Message, ToolCall, ToolSpec, Usage
 from researchos.project import Project, ResearchRequest
 from researchos.tools import ToolRegistry, build_research_tools
 from researchos.usage import Limits, Pricing, UsageMeter
@@ -27,14 +27,14 @@ class ScriptedLLM:
 
     model = "scripted"
 
-    def __init__(self, replies: Sequence[Message | LLMError]) -> None:
+    def __init__(self, replies: Sequence[Message | BaseException]) -> None:
         self._replies = list(replies)
         self.requests: list[list[Message]] = []
 
     def chat(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> LLMResponse:
         self.requests.append(list(messages))
         reply = self._replies.pop(0)
-        if isinstance(reply, LLMError):
+        if isinstance(reply, BaseException):
             raise reply
         return LLMResponse(message=reply, usage=Usage(1_000, 100), model=self.model)
 
@@ -42,18 +42,35 @@ class ScriptedLLM:
         pass
 
 
-def make_agent(
-    tmp_path: Path, llm: LLMClient, *, max_steps: int = 20, max_cost_usd: float = 10.0
-) -> tuple[ResearchAgent, Project]:
+def make_agent(tmp_path: Path, llm: LLMClient, **options: Any) -> tuple[ResearchAgent, Project]:
     project = Project.create(tmp_path, ResearchRequest(topic="test topic"))
+    return agent_for(project, llm, **options), project
+
+
+def agent_for(
+    project: Project,
+    llm: LLMClient,
+    *,
+    max_steps: int = 20,
+    max_cost_usd: float = 10.0,
+    context_turns: int = 6,
+    run_id: str = "test-run",
+) -> ResearchAgent:
     meter = UsageMeter(
         limits=Limits(max_steps=max_steps, max_cost_usd=max_cost_usd, max_wall_seconds=60),
         pricing=Pricing(input_per_million=1.0, output_per_million=2.0),
         events_path=project.events_path,
-        run_id="test-run",
+        run_id=run_id,
     )
     tools = ToolRegistry(build_research_tools(project, MockSearch(), MockFetcher()))
-    return ResearchAgent(llm=llm, tools=tools, meter=meter, project=project), project
+    return ResearchAgent(
+        llm=llm,
+        tools=tools,
+        meter=meter,
+        project=project,
+        run_id=run_id,
+        context_turns=context_turns,
+    )
 
 
 def tool_results(messages: Sequence[Message]) -> list[dict[str, Any]]:
