@@ -145,6 +145,12 @@ def build_research_tools(project: Project, search: SearchProvider, fetcher: Fetc
         return {"phase": args.phase.value}
 
     def finish_research(args: FinishResearchArgs) -> dict[str, Any]:
+        if not any(note.source_ids for note in project.notes()):
+            raise ToolError(
+                "cannot finish: no saved note cites a fetched source. Research must be "
+                "grounded in sources: fetch_source the relevant pages, then save_note your "
+                "findings with their source_ids before finishing."
+            )
         project.state.summary = args.summary
         path = project.write_report(status="completed", summary=args.summary)
         return {"report": str(path.relative_to(project.root))}

@@ -13,7 +13,7 @@ MOCK_URL = "https://mock.researchos.invalid/test%20topic/1"
 
 
 def test_mock_model_completes_full_research_loop(tmp_path: Path) -> None:
-    agent, project = make_agent(tmp_path, MockLLM())
+    agent, project = make_agent(tmp_path, MockLLM(), grounded=False)
 
     result = agent.run()
 
@@ -59,7 +59,7 @@ def test_notes_cannot_cite_sources_that_were_never_fetched(tmp_path: Path) -> No
     agent.run()
 
     assert "unknown source_id 'src-invented'" in tool_results(llm.requests[-1])[0]["error"]
-    assert project.notes() == []
+    assert [n.text for n in project.notes()] == ["seed finding"]
 
 
 def test_fetched_content_is_wrapped_as_untrusted(tmp_path: Path) -> None:
@@ -126,3 +126,23 @@ def test_untrusted_content_cannot_close_its_own_block() -> None:
 
     assert wrapped.count("<<<END_UNTRUSTED_CONTENT>>>") == 1
     assert wrapped.endswith("<<<END_UNTRUSTED_CONTENT>>>")
+
+
+def test_cannot_finish_without_a_note_citing_a_fetched_source(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        [
+            call("finish_research", summary="From memory"),
+            call("save_note", text="uncited claim"),
+            call("finish_research", summary="Still from memory"),
+            call("fetch_source", url=MOCK_URL),
+            call("save_note", text="cited", source_ids=["src-placeholder"]),
+        ]
+    )
+    agent, project = make_agent(tmp_path, llm, grounded=False, max_steps=5)
+
+    result = agent.run()
+
+    errors = [r["error"] for r in tool_results(llm.requests[-1]) if "error" in r]
+    assert any("cannot finish" in e for e in errors)
+    assert result.status is RunStatus.BUDGET_EXHAUSTED
+    assert project.state.summary is None

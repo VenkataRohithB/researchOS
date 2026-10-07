@@ -157,7 +157,8 @@ def _message_to_json(message: Message) -> dict[str, Any]:
         "role": message.role,
         "content": message.content,
         "tool_calls": [
-            {"id": c.id, "name": c.name, "arguments": c.arguments} for c in message.tool_calls
+            {"id": c.id, "name": c.name, "arguments": c.arguments, "provider_data": c.provider_data}
+            for c in message.tool_calls
         ],
         "tool_call_id": message.tool_call_id,
     }

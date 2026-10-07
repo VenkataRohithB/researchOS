@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -126,3 +127,23 @@ def test_error_wrapped_in_a_list_is_unwrapped() -> None:
         client(lambda _: httpx.Response(403, json=body)).chat(
             [Message(role="user", content="x")], []
         )
+
+
+def test_provider_specific_tool_call_fields_round_trip() -> None:
+    signature = {"google": {"thought_signature": "c2lnbmF0dXJl"}}
+    body = json.loads(json.dumps(OK_BODY))
+    body["choices"][0]["message"]["tool_calls"][0]["extra_content"] = signature
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json=body)
+
+    llm = client(handler)
+    first = llm.chat([Message(role="user", content="x")], [TOOL])
+    llm.chat([Message(role="user", content="x"), first.message], [TOOL])
+
+    assert first.message.tool_calls[0].provider_data == {"extra_content": signature}
+    echoed = sent[1]["messages"][1]["tool_calls"][0]
+    assert echoed["extra_content"] == signature
+    assert echoed["function"]["name"] == "search_web"

@@ -15,6 +15,9 @@ class ToolCall:
     name: str
     arguments: str
     """Raw JSON text produced by the model; validated by the tool registry, never trusted."""
+    provider_data: dict[str, Any] | None = None
+    """Extra provider-specific fields on the call (e.g. Gemini thought signatures in
+    `extra_content`). Opaque to the agent; sent back to the provider unchanged."""
 
 
 @dataclass(frozen=True)

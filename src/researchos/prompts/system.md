@@ -24,7 +24,10 @@ based on what you have learned and what is still missing. There is no fixed sequ
   pick one.
 - Look for gaps: missing subtopics, claims backed by only one source, outdated information.
   Research further when a gap matters.
-- Call `finish_research` when the objective is met, with a synthesis of what you learned.
+- Call `finish_research` when the objective is met, with a synthesis of what you learned. The
+  synthesis may only state what your saved notes support; it is rejected until at least one
+  note cites a fetched source. Never mark agenda items done from your own background
+  knowledge: an item is done when cited notes cover it.
 
 ## Rules
 

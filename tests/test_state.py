@@ -7,7 +7,7 @@ import pytest
 from helpers import ScriptedLLM, agent_for, call, make_agent, tool_results
 
 from researchos.context import Transcript
-from researchos.llm import Message, MockLLM
+from researchos.llm import Message, MockLLM, ToolCall
 from researchos.project import Project, ProjectLockedError, ResearchRequest
 from researchos.state import Phase, RunStatus
 
@@ -18,7 +18,7 @@ def reopen(project: Project) -> Project:
 
 
 def test_state_and_transcript_are_persisted(tmp_path: Path) -> None:
-    agent, project = make_agent(tmp_path, MockLLM())
+    agent, project = make_agent(tmp_path, MockLLM(), grounded=False)
     agent.run()
 
     state = reopen(project).state
@@ -31,7 +31,7 @@ def test_state_and_transcript_are_persisted(tmp_path: Path) -> None:
 
 
 def test_resume_continues_where_the_previous_run_stopped(tmp_path: Path) -> None:
-    agent, project = make_agent(tmp_path, MockLLM(), max_steps=2)
+    agent, project = make_agent(tmp_path, MockLLM(), grounded=False, max_steps=2)
     assert agent.run().status is RunStatus.BUDGET_EXHAUSTED
 
     project = reopen(project)
@@ -137,8 +137,8 @@ def test_read_notes_pages_through_notes(tmp_path: Path) -> None:
     agent.run()
 
     page = tool_results(llm.requests[-1])[-1]
-    assert page["total"] == 2
-    assert [n["text"] for n in page["notes"]] == ["second"]
+    assert page["total"] == 3
+    assert [n["text"] for n in page["notes"]] == ["first", "second"]
 
 
 def test_transcript_ignores_a_partially_written_last_line(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_source_titles_in_snapshot_are_untrusted(tmp_path: Path) -> None:
     agent.run()
 
     snapshot = llm.requests[-1][1].content or ""
-    sources_section = snapshot.split("## Sources fetched (1)\n", 1)[1]
+    sources_section = snapshot.split("## Sources fetched (2)\n", 1)[1]
     assert sources_section.startswith("<<<UNTRUSTED_CONTENT origin=source-titles>>>")
 
 
@@ -172,3 +172,22 @@ def test_nudge_is_part_of_the_recorded_turn(tmp_path: Path) -> None:
 
     first_turn = json.loads(project.transcript_path.read_text().splitlines()[0])
     assert [m["role"] for m in first_turn["messages"]] == ["assistant", "user"]
+
+
+def test_transcript_preserves_provider_data_on_tool_calls(tmp_path: Path) -> None:
+    signed = Message(
+        role="assistant",
+        tool_calls=(
+            ToolCall(
+                id="c1",
+                name="finish_research",
+                arguments='{"summary": "x"}',
+                provider_data={"extra_content": {"google": {"thought_signature": "sig"}}},
+            ),
+        ),
+    )
+    agent, project = make_agent(tmp_path, ScriptedLLM([signed]))
+    agent.run()
+
+    (turn,) = Transcript(project.transcript_path).recent(1)
+    assert turn.messages[0].tool_calls == signed.tool_calls

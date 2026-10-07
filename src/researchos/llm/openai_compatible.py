@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 _AUTHORIZATION_STATUS = frozenset({401, 402, 403})
 _MAX_BACKOFF_SECONDS = 30.0
+_STANDARD_CALL_KEYS = frozenset({"id", "type", "function"})
 
 
 class OpenAICompatibleClient:
@@ -102,6 +103,7 @@ def _encode_message(message: Message) -> dict[str, Any]:
     if message.tool_calls:
         encoded["tool_calls"] = [
             {
+                **(call.provider_data or {}),
                 "id": call.id,
                 "type": "function",
                 "function": {"name": call.name, "arguments": call.arguments},
@@ -132,6 +134,8 @@ def _decode_response(body: dict[str, Any], requested_model: str) -> LLMResponse:
                 id=str(call["id"]),
                 name=str(call["function"]["name"]),
                 arguments=str(call["function"].get("arguments") or "{}"),
+                provider_data={k: v for k, v in call.items() if k not in _STANDARD_CALL_KEYS}
+                or None,
             )
             for call in raw.get("tool_calls") or ()
         )
