@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 _AUTHORIZATION_STATUS = frozenset({401, 402, 403})
 _MAX_BACKOFF_SECONDS = 30.0
+_MAX_SERVER_DELAY_SECONDS = 120.0
 _STANDARD_CALL_KEYS = frozenset({"id", "type", "function"})
 
 
@@ -92,7 +93,11 @@ class OpenAICompatibleClient:
 
             if attempt == self._max_retries:
                 raise LLMUnavailableError(f"giving up after {attempt + 1} attempts ({failure})")
-            delay = min(delay if delay is not None else 2.0**attempt, _MAX_BACKOFF_SECONDS)
+            delay = (
+                min(delay, _MAX_SERVER_DELAY_SECONDS)
+                if delay is not None
+                else min(2.0**attempt, _MAX_BACKOFF_SECONDS)
+            )
             logger.warning("LLM request failed (%s); retrying in %.1fs", failure, delay)
             self._sleep(delay)
         raise AssertionError("unreachable")
@@ -154,24 +159,41 @@ def _decode_response(body: dict[str, Any], requested_model: str) -> LLMResponse:
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
-    value = response.headers.get("retry-after")
-    if value is None:
-        return None
-    try:
-        return max(0.0, float(value))
-    except ValueError:
-        return None
+    """The server's requested wait: the Retry-After header, or Google's RetryInfo
+    (`error.details[].retryDelay`, e.g. "59s") in the error body."""
+    header = response.headers.get("retry-after")
+    if header is not None:
+        try:
+            return max(0.0, float(header))
+        except ValueError:
+            return None
+    error = _error_object(response)
+    details = error.get("details") if error else None
+    for detail in details if isinstance(details, list) else ():
+        if isinstance(detail, dict) and str(detail.get("@type", "")).endswith("RetryInfo"):
+            delay = str(detail.get("retryDelay", ""))
+            try:
+                return max(0.0, float(delay.removesuffix("s")))
+            except ValueError:
+                return None
+    return None
 
 
 def _error_detail(response: httpx.Response, limit: int = 300) -> str:
+    error = _error_object(response)
+    message = error.get("message") if error else None
+    text = str(message) if message else response.text
+    return text[:limit] or response.reason_phrase
+
+
+def _error_object(response: httpx.Response) -> dict[str, Any] | None:
+    """The `error` object of an error response, if the body has one."""
     try:
         body = response.json()
-        # Some providers (e.g. Gemini) wrap the error object in a one-element list.
-        if isinstance(body, list) and len(body) == 1:
-            body = body[0]
-        error = body.get("error") if isinstance(body, dict) else None
-        message = error.get("message") if isinstance(error, dict) else error
-        text = str(message) if message else response.text
     except ValueError:
-        text = response.text
-    return text[:limit] or response.reason_phrase
+        return None
+    # Some providers (e.g. Gemini) wrap the error object in a one-element list.
+    if isinstance(body, list) and len(body) == 1:
+        body = body[0]
+    error = body.get("error") if isinstance(body, dict) else None
+    return error if isinstance(error, dict) else None

@@ -18,8 +18,21 @@ cp .env.example .env
 ```
 
 The defaults in `.env.example` use mock providers, so everything runs offline without
-credentials. To use a real model, set `LLM_PROVIDER=openai_compatible` with `LLM_MODEL`,
-`LLM_API_KEY` and `LLM_BASE_URL`; for real web search set `SEARCH_PROVIDER=tavily` and
+credentials.
+
+**Model:** set `LLM_PROVIDER=openai_compatible` with `LLM_MODEL`, `LLM_API_KEY` and
+`LLM_BASE_URL`. Any OpenAI Chat Completions-compatible endpoint works, for example Gemini
+(`https://generativelanguage.googleapis.com/v1beta/openai/`) or Claude
+(`https://api.anthropic.com/v1/`).
+
+**Web search:** either run SearXNG locally (no account needed; requires Docker):
+
+```bash
+echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> .env   # once
+docker compose up -d                                   # serves http://127.0.0.1:8888
+```
+
+and set `SEARCH_PROVIDER=searxng`, or use Tavily with `SEARCH_PROVIDER=tavily` and
 `SEARCH_API_KEY`.
 
 ## Usage

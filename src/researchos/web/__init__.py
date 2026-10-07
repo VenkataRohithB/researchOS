@@ -9,14 +9,19 @@ from researchos.web.search import (
     SearchError,
     SearchProvider,
     SearchResult,
+    SearXNGSearch,
     TavilySearch,
 )
 
 
 def create_search_provider(settings: Settings) -> SearchProvider:
-    if settings.search_provider == "mock":
-        return MockSearch()
-    return TavilySearch(settings.search_api_key)
+    match settings.search_provider:
+        case "mock":
+            return MockSearch()
+        case "searxng":
+            return SearXNGSearch(settings.searxng_url)
+        case "tavily":
+            return TavilySearch(settings.search_api_key)
 
 
 def create_fetcher(settings: Settings) -> Fetcher:
@@ -33,6 +38,7 @@ __all__ = [
     "HttpFetcher",
     "MockFetcher",
     "MockSearch",
+    "SearXNGSearch",
     "SearchError",
     "SearchProvider",
     "SearchResult",

@@ -1,0 +1,16 @@
+# SearXNG configuration for ResearchOS. Everything not set here uses SearXNG's defaults.
+# The secret key comes from the SEARXNG_SECRET environment variable (see compose.yaml).
+use_default_settings: true
+
+server:
+  # Only reachable from this machine (see the port binding in compose.yaml), so the
+  # public-instance bot limiter would only get in the agent's way.
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  # ResearchOS consumes the JSON API, which SearXNG disables by default.
+  formats:
+    - html
+    - json

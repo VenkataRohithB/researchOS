@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=120.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
 
-    search_provider: Literal["tavily", "mock"] = "mock"
+    search_provider: Literal["searxng", "tavily", "mock"] = "mock"
     search_api_key: SecretStr = SecretStr("")
+    searxng_url: str = "http://127.0.0.1:8888"
 
     max_steps: int = Field(default=150, gt=0)
     max_cost_usd: float = Field(default=5.0, gt=0)
@@ -35,6 +36,6 @@ class Settings(BaseSettings):
     def _require_credentials(self) -> Self:
         if self.llm_provider != "mock" and not self.llm_api_key.get_secret_value():
             raise ValueError("LLM_API_KEY is required when LLM_PROVIDER is not 'mock'")
-        if self.search_provider != "mock" and not self.search_api_key.get_secret_value():
-            raise ValueError("SEARCH_API_KEY is required when SEARCH_PROVIDER is not 'mock'")
+        if self.search_provider == "tavily" and not self.search_api_key.get_secret_value():
+            raise ValueError("SEARCH_API_KEY is required when SEARCH_PROVIDER is 'tavily'")
         return self

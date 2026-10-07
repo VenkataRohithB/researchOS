@@ -147,3 +147,36 @@ def test_provider_specific_tool_call_fields_round_trip() -> None:
     echoed = sent[1]["messages"][1]["tool_calls"][0]
     assert echoed["extra_content"] == signature
     assert echoed["function"]["name"] == "search_web"
+
+
+def test_honours_google_retry_info_delay_in_error_body() -> None:
+    quota_error = [
+        {
+            "error": {
+                "code": 429,
+                "message": "quota exceeded",
+                "details": [
+                    {"@type": "type.googleapis.com/google.rpc.Help"},
+                    {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "59s"},
+                ],
+            }
+        }
+    ]
+    responses = [httpx.Response(429, json=quota_error), httpx.Response(200, json=OK_BODY)]
+    sleeps: list[float] = []
+
+    client(lambda _: responses.pop(0), sleeps).chat([Message(role="user", content="x")], [])
+
+    assert sleeps == [59.0]
+
+
+def test_server_requested_delay_is_capped() -> None:
+    responses = [
+        httpx.Response(429, headers={"retry-after": "3600"}),
+        httpx.Response(200, json=OK_BODY),
+    ]
+    sleeps: list[float] = []
+
+    client(lambda _: responses.pop(0), sleeps).chat([Message(role="user", content="x")], [])
+
+    assert sleeps == [120.0]

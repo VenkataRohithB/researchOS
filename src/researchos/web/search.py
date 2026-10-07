@@ -69,6 +69,49 @@ class TavilySearch:
             raise SearchError("search provider returned an unexpected response") from exc
 
 
+class SearXNGSearch:
+    """A SearXNG instance's JSON API (see compose.yaml for the local setup)."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout_seconds: float = 30.0,
+        http_client: httpx.Client | None = None,
+    ) -> None:
+        self._url = base_url.rstrip("/") + "/search"
+        self._http = http_client or httpx.Client(timeout=timeout_seconds)
+
+    def close(self) -> None:
+        self._http.close()
+
+    def search(self, query: str, max_results: int) -> list[SearchResult]:
+        try:
+            response = self._http.get(self._url, params={"q": query, "format": "json"})
+        except httpx.TransportError as exc:
+            raise SearchError(f"search service unreachable: {exc.__class__.__name__}") from exc
+        if response.status_code != 200:
+            raise SearchError(f"search service returned HTTP {response.status_code}")
+        try:
+            body = response.json()
+            items = body["results"]
+            results = [
+                SearchResult(
+                    title=str(item.get("title") or ""),
+                    url=str(item["url"]),
+                    snippet=str(item.get("content") or ""),
+                )
+                for item in items
+                if str(item.get("url", "")).startswith(("http://", "https://"))
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise SearchError("search service returned an unexpected response") from exc
+        if not results and body.get("unresponsive_engines"):
+            engines = ", ".join(str(e[0]) for e in body["unresponsive_engines"])
+            raise SearchError(f"no results; search engines unavailable: {engines}")
+        return results[:max_results]
+
+
 class MockSearch:
     """Deterministic offline results. URLs point at `MOCK_HOST`, served by `MockFetcher`."""
 
