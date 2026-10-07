@@ -118,3 +118,11 @@ def test_malformed_response_is_rejected() -> None:
         client(lambda _: httpx.Response(200, json={"choices": []})).chat(
             [Message(role="user", content="x")], []
         )
+
+
+def test_error_wrapped_in_a_list_is_unwrapped() -> None:
+    body = [{"error": {"code": 403, "message": "project denied"}}]
+    with pytest.raises(LLMAuthorizationError, match=r"HTTP 403: project denied$"):
+        client(lambda _: httpx.Response(403, json=body)).chat(
+            [Message(role="user", content="x")], []
+        )

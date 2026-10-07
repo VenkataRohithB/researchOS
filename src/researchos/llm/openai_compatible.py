@@ -162,6 +162,9 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 def _error_detail(response: httpx.Response, limit: int = 300) -> str:
     try:
         body = response.json()
+        # Some providers (e.g. Gemini) wrap the error object in a one-element list.
+        if isinstance(body, list) and len(body) == 1:
+            body = body[0]
         error = body.get("error") if isinstance(body, dict) else None
         message = error.get("message") if isinstance(error, dict) else error
         text = str(message) if message else response.text
