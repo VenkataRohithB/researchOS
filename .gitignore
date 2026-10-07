@@ -1,0 +1,12 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# research projects are their own git repos
+workspace/
