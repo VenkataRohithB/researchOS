@@ -6,6 +6,7 @@ import argparse
 import logging
 import sys
 import uuid
+import webbrowser
 from collections.abc import Sequence
 from contextlib import closing
 
@@ -15,6 +16,7 @@ from researchos.agent import ResearchAgent, RunResult
 from researchos.config import Settings
 from researchos.llm import create_llm_client
 from researchos.project import Project, ProjectLockedError, ProjectNotFoundError, ResearchRequest
+from researchos.site import build_site
 from researchos.state import RunStatus
 from researchos.tools import ToolRegistry, build_research_tools
 from researchos.usage import Limits, Pricing, UsageMeter
@@ -55,6 +57,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.instruction:
                 project.add_directive(args.instruction)
             return _run(settings, project)
+        if args.command == "build":
+            path = build_site(project)
+            print(f"Website: {path}")
+            if args.open:
+                webbrowser.open(path.resolve().as_uri())
+            return EXIT_OK
         if args.command == "steer":
             project.add_directive(args.instruction)
             print("Instruction recorded. A running agent sees it on its next step;")
@@ -107,9 +115,11 @@ def run_research(settings: Settings, project: Project) -> RunResult:
 
 def _run(settings: Settings, project: Project) -> int:
     result = run_research(settings, project)
+    website = build_site(project)
     usage = result.usage
     print(
         f"\nStatus:  {result.status.value} ({result.reason})\n"
+        f"Website: {website}\n"
         f"Report:  {result.report_path}\n"
         f"Usage:   {usage.steps} steps, {usage.llm_calls} LLM calls, "
         f"{usage.tool_calls} tool calls ({usage.tool_errors} failed), "
@@ -176,6 +186,10 @@ def _parser() -> argparse.ArgumentParser:
     steer = commands.add_parser("steer", help="give an instruction to a project's agent")
     steer.add_argument("project", help="project id or path")
     steer.add_argument("instruction", help='e.g. "go deeper on the memory architecture"')
+
+    build = commands.add_parser("build", help="regenerate a project's website")
+    build.add_argument("project", help="project id or path")
+    build.add_argument("--open", action="store_true", help="open the website in a browser")
 
     status = commands.add_parser("status", help="show a project's state")
     status.add_argument("project", help="project id or path")

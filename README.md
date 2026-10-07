@@ -48,7 +48,13 @@ researchos list                              # all projects and their status
 researchos status <project>                  # phase, agenda, progress, usage
 researchos steer <project> "go deeper on reranking"   # works while a run is in progress
 researchos resume <project> ["optional instruction"]  # continue after a stop or Ctrl-C
+researchos build <project> --open            # regenerate the website and open it
 ```
+
+Every run ends by generating the project's website at `workspace/<project-id>/website/index.html`:
+a single self-contained file (works offline, safe to share) with the summary and its contents,
+findings with their sources in the margin, the research plan, numbered sources, a run log,
+search (press `/`), and light/dark themes.
 
 Each project lives under `workspace/<project-id>/`:
 
@@ -62,6 +68,7 @@ sources/sources.json        fetched sources
 sources/snapshots/          extracted text of each source
 notes/notes.jsonl           findings, each citing source ids
 report.md                   report
+website/index.html          the project website
 ```
 
 Exit codes: `0` research finished, `1` run stopped early (budget, model failure, stalled),

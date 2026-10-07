@@ -59,3 +59,18 @@ def test_missing_credentials_is_a_usage_error(
     monkeypatch.setenv("LLM_API_KEY", "")
 
     assert main(["list"]) == EXIT_USAGE_ERROR
+
+
+def test_runs_build_a_website_and_build_regenerates_it(
+    workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["-q", "new", "Nanosheets"]) == EXIT_OK
+    project_id = only_project(workspace)
+    site = workspace / project_id / "website" / "index.html"
+    assert site.is_file()
+
+    site.unlink()
+    assert main(["build", project_id]) == EXIT_OK
+
+    assert site.is_file()
+    assert f"Website: {site}" in capsys.readouterr().out

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{{ csp }}">
+<meta name="referrer" content="no-referrer">
+<meta name="generator" content="ResearchOS">
+<title>{{ site.topic }}</title>
+<style>{{ css }}</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="shell">
+
+<aside class="rail" id="rail">
+  <div class="rail-top">
+    <a class="rail-title" href="#top">{{ site.topic }}</a>
+    <button class="rail-toggle" type="button" aria-expanded="false" aria-controls="rail-body">Contents</button>
+  </div>
+  <div class="rail-body" id="rail-body">
+    <div class="search">
+      <label class="visually-hidden" for="search">Search this research</label>
+      <input id="search" type="search" placeholder="Search findings, sources, summary" autocomplete="off" spellcheck="false">
+      <kbd class="search-key" aria-hidden="true">/</kbd>
+      <div class="search-results" id="search-results" hidden></div>
+    </div>
+    <nav aria-label="Contents">
+      <ul class="toc">
+        {% if site.summary_html %}
+        <li><a href="#summary">Summary</a>
+          {% if site.summary_toc %}
+          <ul>
+            {% for entry in site.summary_toc %}
+            <li class="toc-level-{{ entry.level }}"><a href="#{{ entry.anchor }}">{{ entry.title }}</a></li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </li>
+        {% endif %}
+        <li><a href="#findings">Findings <span class="count">{{ site.findings|length }}</span></a></li>
+        {% if site.agenda %}<li><a href="#agenda">Research plan <span class="count">{{ agenda_done }}/{{ site.agenda|length }}</span></a></li>{% endif %}
+        <li><a href="#sources">Sources <span class="count">{{ site.sources|length }}</span></a></li>
+        {% if site.runs %}<li><a href="#log">Research log</a></li>{% endif %}
+      </ul>
+    </nav>
+    <button class="theme-toggle" type="button" id="theme-toggle">Theme: match system</button>
+  </div>
+</aside>
+
+<main id="main" tabindex="-1">
+  <header class="hero" id="top">
+    <h1>{{ site.topic }}</h1>
+    {% if site.goal %}<p class="hero-goal">{{ site.goal }}</p>{% endif %}
+    <p class="hero-meta">
+      Based on {{ site.findings|length }} finding{{ "" if site.findings|length == 1 else "s" }}
+      from {{ site.sources|length }} source{{ "" if site.sources|length == 1 else "s" }}, researched on {{ site.researched_on }}.
+      {% if site.level %}Written for: {{ site.level }}.{% endif %}
+    </p>
+    {% if site.agenda %}
+    <div class="coverage">
+      <p class="coverage-label">{{ agenda_done }} of {{ site.agenda|length }} research questions covered</p>
+      <ol class="coverage-bar" aria-hidden="true">
+        {% for item in site.agenda %}<li class="coverage-{{ item.status }}"></li>{% endfor %}
+      </ol>
+    </div>
+    {% endif %}
+    {% if site.stopped_reason %}
+    <div class="notice" role="note">
+      <p><strong>This research is unfinished.</strong> {{ site.stopped_reason }}.</p>
+      <p>Continue it with <code>researchos resume {{ site.project_id }}</code></p>
+    </div>
+    {% endif %}
+  </header>
+
+  {% if site.summary_html %}
+  <section class="section" id="summary" aria-labelledby="summary-heading">
+    <h2 id="summary-heading">Summary</h2>
+    <p class="section-lede">The agent's synthesis of its findings. Each claim should trace back to a cited finding below; use those to check anything that matters.</p>
+    <div class="prose">{{ site.summary_html }}</div>
+  </section>
+  {% endif %}
+
+  <section class="section" id="findings" aria-labelledby="findings-heading">
+    <h2 id="findings-heading">Findings</h2>
+    {% if site.findings %}
+    <p class="section-lede">What the agent recorded while reading, with the sources each finding came from.</p>
+    <ul class="findings">
+      {% for finding in site.findings %}
+      <li class="finding" id="{{ finding.anchor }}">
+        <div class="finding-text">
+          <p>{{ finding.html }}{% for cite in finding.citations %}<a class="cite" href="#{{ cite.anchor }}" aria-label="Source {{ cite.number }}: {{ cite.title }}">{{ cite.number }}<span class="cite-tip" aria-hidden="true">{{ cite.title }}<span>{{ cite.domain }}</span></span></a>{% endfor %}</p>
+        </div>
+        <ul class="finding-sources" aria-label="Sources for {{ finding.label }}">
+          <li class="finding-label">{{ finding.label }}</li>
+          {% for cite in finding.citations %}
+          <li><a href="#{{ cite.anchor }}"><span class="source-number">{{ cite.number }}</span>{{ cite.domain }}</a></li>
+          {% else %}
+          <li class="uncited">No source cited</li>
+          {% endfor %}
+        </ul>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No findings yet. Findings appear here as the agent reads sources and records what it learns.</p>
+    {% endif %}
+  </section>
+
+  {% if site.agenda %}
+  <section class="section" id="agenda" aria-labelledby="agenda-heading">
+    <h2 id="agenda-heading">Research plan</h2>
+    <p class="section-lede">The questions the agent set out to answer, and where each one stands.</p>
+    <ul class="agenda">
+      {% for item in site.agenda %}
+      <li class="agenda-item agenda-{{ item.status }}">
+        <span class="agenda-status">{{ {"done": "Covered", "open": "Open", "dropped": "Dropped"}[item.status] }}</span>
+        <span class="agenda-text">{{ item.html }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <section class="section" id="sources" aria-labelledby="sources-heading">
+    <h2 id="sources-heading">Sources</h2>
+    {% if site.sources %}
+    <ol class="sources">
+      {% for source in site.sources %}
+      <li class="source" id="{{ source.anchor }}">
+        <span class="source-number">{{ source.number }}</span>
+        <div>
+          <a class="source-title" href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }}</a>
+          <p class="source-meta">{{ source.domain }}, fetched {{ source.fetched }}.
+            {% if source.cited_by %}Cited in finding{{ "s" if source.cited_by|length > 1 }} {% for anchor, number in source.cited_by %}<a href="#{{ anchor }}">{{ number }}</a>{{ ", " if not loop.last }}{% endfor %}.{% else %}Not cited in any finding.{% endif %}
+          </p>
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="empty">No sources yet. Every page the agent reads is listed here with a link to the original.</p>
+    {% endif %}
+  </section>
+
+  {% if site.runs %}
+  <section class="section" id="log" aria-labelledby="log-heading">
+    <h2 id="log-heading">Research log</h2>
+    <div class="table-wrap">
+      <table class="runs">
+        <thead><tr><th scope="col">Started (UTC)</th><th scope="col">Outcome</th><th scope="col" class="num">Steps</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col" class="num">Time</th></tr></thead>
+        <tbody>
+          {% for run in site.runs %}
+          <tr><td>{{ run.started }}</td><td>{{ run.status }}</td><td class="num">{{ run.steps }}</td><td class="num">{{ "{:,}".format(run.tokens) }}</td><td class="num">{{ run.cost }}</td><td class="num">{{ run.duration }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  <footer class="footer">
+    <p>Generated by ResearchOS on {{ site.generated_at }} from project <code>{{ site.project_id }}</code>.</p>
+  </footer>
+</main>
+</div>
+<script type="application/json" id="search-data">{{ search_json }}</script>
+<script>{{ js }}</script>
+</body>
+</html>
