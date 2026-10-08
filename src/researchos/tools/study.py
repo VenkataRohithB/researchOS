@@ -171,7 +171,6 @@ def _apply(project: Project, source_id: str, result: StudyResult) -> dict[str, A
 
     created: list[str] = []
     problems: list[str] = []
-    new_claims = [project.get_claim(r["claim_id"]) for r in recorded]
     for concept in result.concepts:
         change = project.merge_concept(
             concept.title,
@@ -185,9 +184,10 @@ def _apply(project: Project, source_id: str, result: StudyResult) -> dict[str, A
             created.append(change.concept.id)
         problems += change.problems
 
-    # Readers often leave a claim's concepts empty; link every new claim to the concepts it
-    # names, so each concept gathers the evidence its explanations will be written from.
-    for claim in new_claims:
+    # Readers often leave a claim's concepts empty; link every claim to the concepts it names,
+    # so each concept gathers the evidence its explanations are written from. Linking is
+    # idempotent, and covering all claims also links older ones to newly found concepts.
+    for claim in project.claims():
         for concept_ref in mentioned_concepts(project, claim.text):
             project.merge_concept(concept_ref, claim_ids=[claim.id])
 
