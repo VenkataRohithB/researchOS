@@ -5,7 +5,7 @@ topic with tools, verifies claims against sources, builds a knowledge graph, and
 publishes an explorable static learning website with multiple depth levels and
 presentation modes.
 
-> Status: early development (Phase 3: source verification).
+> Status: early development. Research, verification, concept graph, multi-depth explanations and the interactive site work end to end.
 
 ## Setup
 
@@ -40,35 +40,46 @@ and set `SEARCH_PROVIDER=searxng`, or use Tavily with `SEARCH_PROVIDER=tavily` a
 With the virtualenv activated (`source .venv/bin/activate`):
 
 ```bash
-researchos new "How retrieval-augmented generation works" \
-    --goal "understand it well enough to build one" \
-    --level "software engineer, new to ML"
-
-researchos list                              # all projects and their status
-researchos status <project>                  # phase, agenda, progress, usage
-researchos steer <project> "go deeper on reranking"   # works while a run is in progress
-researchos resume <project> ["optional instruction"]  # continue after a stop or Ctrl-C
-researchos build <project> --open            # regenerate the website and open it
+researchos "How does Apple Silicon's unified memory work"   # research a topic
+researchos                                                    # or be asked what to research
 ```
 
-Every run ends by generating the project's website at `workspace/<project-id>/website/index.html`:
-a single self-contained file (works offline, safe to share) with the summary and its contents,
-findings with their sources in the margin, the research plan, numbered sources, a run log,
-search (press `/`), and light/dark themes.
+The agent may ask you a few questions first (an ambiguous topic, your level or goal). When
+it finishes it prints the website's path and asks what you would like to improve; describe
+it ("go deeper on the GPU side", "explain it more simply") and it continues the same
+project, building on what is already there. Press Enter to stop.
 
-Each project lives under `workspace/<project-id>/`:
+```bash
+researchos list                                   # your projects
+researchos improve <project> "add a comparison with discrete GPUs"
+researchos build <project> --open                 # open the website
+researchos status <project>                       # progress, claims, concepts, usage
+researchos resume <project>                       # continue after a stop or Ctrl-C
+researchos steer <project> "focus on bandwidth"   # instruct a run in progress
+```
+
+### The website
+
+Every run generates `workspace/<project-id>/website/index.html`, one self-contained file that
+works offline:
+
+- **Learn**: concepts in learning order (prerequisites first), each with a depth scale
+  (Summary, Beginner, Intermediate, Deep, Expert), "Learn first", "Go deeper" and related
+  concepts, and breadcrumbs back up.
+- **Evidence everywhere**: every cited claim opens the passages quoted from its sources and
+  whether it is verified, single-source or disputed.
+- **Map**: an interactive concept map; **Read**: everything as one article at your chosen
+  depth; **Revise**: flashcards and facts confirmed by independent sources;
+  **Sources**: every page read, the research plan and the run log. Search with `/`.
+
+### Project files
 
 ```
-metadata/project.json       the request
-metadata/state.json         phase, agenda, summary, every run with its status and usage
-metadata/transcript.jsonl   every agent step: the model's reply and the tool results
-metadata/directives.jsonl   instructions given with steer/resume
-metadata/events.jsonl       every LLM and tool call, with tokens, cost and latency
-sources/sources.json        fetched sources: canonical URL, tier, publication date, duplicates
-sources/snapshots/          extracted text of each source (HTML or PDF)
-knowledge/claims.json       claims with quoted evidence
-report.md                   report
-website/index.html          the project website
+metadata/      project.json, state.json, transcript.jsonl, directives.jsonl, events.jsonl
+sources/       sources.json and the extracted text of every source (HTML or PDF)
+knowledge/     claims.json (quoted evidence) and concepts.json (the knowledge graph)
+website/       index.html
+report.md      plain-text report
 ```
 
 Exit codes: `0` research finished, `1` run stopped early (budget, model failure, stalled),
@@ -76,28 +87,34 @@ Exit codes: `0` research finished, `1` run stopped early (budget, model failure,
 
 ## How it works
 
-The model drives a tool-calling loop: each step it chooses tools, the harness validates the
-arguments and executes them, and the results are fed back. There is no fixed sequence.
+A tool-calling agent loop decides what to do next; heavy jobs run as focused model calls
+inside tools:
 
-| Tools | Purpose |
+| Tool | What it does |
 |---|---|
+| `ask_user` | Clarifying questions when the request is ambiguous |
 | `update_agenda`, `set_phase` | Plan the research and record its stage |
-| `search_web`, `fetch_source`, `read_source`, `search_sources` | Find, fetch and read sources (HTML or PDF) |
-| `record_claim`, `add_evidence`, `get_claim`, `list_claims` | Record claims backed by quotes; cross-check them |
+| `search_web`, `fetch_source` | Find and fetch sources (HTML or PDF) |
+| `study_source` | A dedicated reading pass: claims with quotes, corroboration of claims from other sources, concepts and their relationships |
+| `explain_concepts` | A dedicated writing pass: each concept at five depths, citing its claims |
+| `search_sources`, `read_source`, `record_claim`, `add_evidence`, `get_claim`, `list_claims` | Targeted look-ups and manual evidence |
+| `list_concepts`, `get_concept`, `update_concept` | Inspect and correct the concept graph |
 | `assess_source` | Correct a source's reliability tier |
 | `finish_research` | End with a synthesis |
 
-**Evidence rules.** Findings are recorded as claims, labelled fact, interpretation or inference,
-and backed by passages quoted from sources. Every quote is checked word for word against the
-stored source text; quotes that are not found are rejected. A claim's status is computed, not
-asserted: *verified* needs two independent sources (different sites, not copies of the same
-document, which are detected by content), *single source* has one, *disputed* has a
-contradicting source. Research cannot finish until at least one claim is supported by a quote.
+**Evidence rules.** Every quote is checked word for word against the stored source text.
+A claim is *verified* when two independent sources support it (different sites, not copies,
+which are detected by content), *single-source* with one, *disputed* when a source
+contradicts it. The harness, not the model, enforces the quality bar: plan items close only
+with the claims that cover them; research cannot finish with open items, unexplained
+concepts, or (without one review round) evidence from fewer than three sites or
+single-source claims; citations in explanations must name the claims the writer was given.
 
-Each step the model sees a fresh snapshot of the research state plus only its last few steps,
-so the prompt stays roughly constant in size however long the research runs. State is saved
-after every step: a run stopped by the budget, an error, Ctrl-C or a crash resumes where it
-left off. A per-project lock prevents two processes from running the same project.
+**State and resilience.** Each step the model sees a snapshot of the research state plus its
+last few steps, so prompts stay small however long the research runs. State is saved after
+every step, so runs resume after a budget stop, error, Ctrl-C or crash. `LLM_MODEL` can list
+several models (`model-a,model-b`); when one's quota is exhausted or it keeps failing, the
+next takes over.
 
 Safety boundaries:
 
@@ -105,6 +122,7 @@ Safety boundaries:
 - Fetching is limited to public http(s) addresses, size-capped, text content only.
 - Web content is wrapped as untrusted data, and the model is told never to follow it.
 - Claims can only cite sources that were actually fetched, with quotes found in them.
+- The website escapes all model and web text and pins its inline code with a strict CSP.
 - Step, cost and wall-clock limits end the run gracefully.
 
 ## Development
