@@ -78,6 +78,8 @@ class ResearchState(BaseModel):
     summary: str | None = None
     """Synthesis from the most recent `finish_research`."""
     reviewed_claims: list[str] = Field(default_factory=list)
+    breadth_reviewed: bool = False
+    """Whether the agent was already asked to broaden research resting on few sites."""
     clarifications: list[Clarification] = Field(default_factory=list)
     """Weakly supported claims the agent has already been asked to cross-check."""
     runs: list[RunRecord] = Field(default_factory=list)

@@ -29,6 +29,7 @@ from researchos.user import UserChannel
 from researchos.web import Fetcher, FetchError, SearchError, SearchProvider
 
 MAX_QUESTIONS_PER_PROJECT = 9
+MIN_INDEPENDENT_SITES = 3
 
 FETCH_EXCERPT_CHARS = 4_000
 PASSAGE_CHARS = 700
@@ -427,6 +428,21 @@ def build_research_tools(
             if claim_id not in project.state.reviewed_claims
             and project.assess(project.get_claim(claim_id)).status in ("single_source", "disputed")
         ]
+        sites = {
+            identity.site
+            for claim in project.claims()
+            for item in claim.evidence
+            if (identity := project.source_identities()[item.source_id])
+        }
+        if len(sites) < MIN_INDEPENDENT_SITES and not project.state.breadth_reviewed:
+            project.state.breadth_reviewed = True
+            raise ToolError(
+                f"review before finishing: the evidence comes from only {len(sites)} independent "
+                f"site(s). Research should rest on at least {MIN_INDEPENDENT_SITES}: find, fetch "
+                "and study more authoritative sources (official documentation, papers, "
+                "reputable publications), then finish. If none can be found, call "
+                "finish_research again."
+            )
         if weak:
             weak = list(dict.fromkeys(weak))
             project.state.reviewed_claims.extend(weak)

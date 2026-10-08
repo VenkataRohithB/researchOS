@@ -16,7 +16,7 @@ from researchos.usage import Limits, Pricing, UsageMeter
 from researchos.user import NoUser, UserChannel
 from researchos.web import FetchedPage, MockFetcher, MockSearch
 
-SEED_URL = "https://seed.example/background"
+SEED_SITES = ("seed-one.example", "seed-two.example", "seed-three.example")
 SEED_QUOTE = "The seeded source states this background finding plainly"
 
 
@@ -50,14 +50,18 @@ class ScriptedLLM:
 def make_agent(
     tmp_path: Path, llm: LLMClient, *, grounded: bool = True, **options: Any
 ) -> tuple[ResearchAgent, Project]:
-    """`grounded` seeds one fetched source and a note citing it, so scripts may call
-    finish_research directly."""
+    """`grounded` seeds a verified finding, so scripts may call finish_research directly."""
     project = Project.create(tmp_path, ResearchRequest(topic="test topic"))
     if grounded:
-        seed = project.add_source(
-            FetchedPage(url=SEED_URL, title="Seed source", text=f"Background. {SEED_QUOTE}.")
-        )
-        project.add_claim("seed finding", "fact", [EvidenceInput(seed.id, SEED_QUOTE, "supports")])
+        # One finding verified by three independent sites, so finishing passes the reviews.
+        seeds = [
+            project.add_source(
+                FetchedPage(url=f"https://{site}/background", title="Seed", text=SEED_QUOTE)
+            )
+            for site in SEED_SITES
+        ]
+        evidence = [EvidenceInput(seed.id, SEED_QUOTE, "supports") for seed in seeds]
+        project.add_claim("seed finding", "fact", evidence)
     return agent_for(project, llm, **options), project
 
 

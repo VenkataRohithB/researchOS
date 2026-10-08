@@ -18,7 +18,8 @@ Extract every important claim the document supports; a substantial document usua
 - `kind` is `fact` when the document states it, `interpretation` when it is your reading of
   what the document means, `inference` when it is a conclusion you draw. Most claims should be
   facts.
-- `concepts` lists the titles of the concepts the claim is about.
+- `concepts` lists the titles of the concepts the claim is about; every claim belongs to at
+  least one. Use the titles of known concepts where they fit, or of concepts you list below.
 
 ## Corroborating what is already known
 

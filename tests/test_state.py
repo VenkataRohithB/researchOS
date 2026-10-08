@@ -23,12 +23,14 @@ def test_state_and_transcript_are_persisted(tmp_path: Path) -> None:
 
     state = reopen(project).state
     assert state.status is RunStatus.COMPLETED
-    assert state.step == 8
     assert state.agenda[0].text == "Understand the basics of test topic"
     assert state.agenda[0].status == "done"
     assert state.summary == "Mock research on 'test topic' complete."
-    assert state.runs[0].usage is not None and state.runs[0].usage.llm_calls == 10
-    assert len(Transcript(project.transcript_path)) == 8
+    assert state.breadth_reviewed and state.reviewed_claims == ["claim-0001"]
+    # Every agent step is a transcript turn; tools made one study and one explain call.
+    assert len(Transcript(project.transcript_path)) == state.step
+    assert state.runs[0].usage is not None
+    assert state.runs[0].usage.llm_calls == state.step + 2
 
 
 def test_resume_continues_where_the_previous_run_stopped(tmp_path: Path) -> None:
@@ -39,10 +41,16 @@ def test_resume_continues_where_the_previous_run_stopped(tmp_path: Path) -> None
     result = agent_for(project, MockLLM(), run_id="second").run()
 
     assert result.status is RunStatus.COMPLETED
-    assert result.usage.steps == 6  # fetch, study, explain, close, review, finish; no re-planning
     state = reopen(project).state
     assert [r.status for r in state.runs] == [RunStatus.BUDGET_EXHAUSTED, RunStatus.COMPLETED]
-    assert state.step == 8
+    assert state.step == 2 + result.usage.steps
+    # The resumed run continued: planning and searching were not repeated.
+    calls = [
+        c.name for turn in Transcript(project.transcript_path).recent(99) for m in turn.messages
+        for c in m.tool_calls
+    ]  # fmt: skip
+    assert calls.count("update_agenda") == 2  # the plan, then closing it
+    assert calls.count("search_web") == 1
     assert len(project.sources()) == 1
 
 
@@ -114,14 +122,12 @@ def test_agenda_and_phase_tools_update_state(tmp_path: Path) -> None:
             ),
             call("set_phase", phase="cross_checking", reason="verifying key claims"),
             call("finish_research", summary="done"),
-            call("finish_research", summary="done, accepting single-source claim-0001"),
         ]
     )
     agent, project = make_agent(tmp_path, llm)
 
+    # The seeded claim is verified by three sites, so finishing needs no review.
     assert agent.run().status is RunStatus.COMPLETED
-    review = tool_results(llm.requests[-1])[-1]["error"]
-    assert "single-source or disputed: claim-0001" in review
 
     state = reopen(project).state
     assert [(i.id, i.status, i.claim_ids) for i in state.agenda] == [
@@ -208,7 +214,7 @@ def test_source_titles_in_snapshot_are_untrusted(tmp_path: Path) -> None:
     agent.run()
 
     snapshot = llm.requests[-1][1].content or ""
-    sources_section = snapshot.split("## Sources fetched (2)\n", 1)[1]
+    sources_section = snapshot.split("## Sources fetched (4)\n", 1)[1]
     assert sources_section.startswith("<<<UNTRUSTED_CONTENT origin=source-titles>>>")
 
 

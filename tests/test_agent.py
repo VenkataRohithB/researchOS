@@ -6,8 +6,10 @@ from pathlib import Path
 from helpers import ScriptedLLM, call, make_agent, tool_results
 
 from researchos.llm import LLMAuthorizationError, LLMUnavailableError, Message, MockLLM
-from researchos.state import RunStatus
+from researchos.project import EvidenceInput, Project
+from researchos.state import ResearchState, RunStatus
 from researchos.untrusted import untrusted
+from researchos.web import FetchedPage
 
 MOCK_URL = "https://mock.researchos.invalid/test%20topic/1"
 
@@ -25,8 +27,8 @@ def test_mock_model_completes_full_research_loop(tmp_path: Path) -> None:
     assert "## Summary" in result.report_path.read_text()
     events = [json.loads(line) for line in project.events_path.read_text().splitlines()]
     purposes = [e["purpose"] for e in events if e["event"] == "llm_call"]
-    # 8 agent steps (one finish is sent back for review), one study and one explanation.
-    assert purposes.count("agent") == 8
+    # Finishing is sent back twice for review (too few sites, a single-source claim).
+    assert purposes.count("agent") == 9
     assert purposes.count("study") == 1
     assert purposes.count("explain") == 1
     assert events[-1]["event"] == "run_end"
@@ -153,3 +155,21 @@ def test_cannot_finish_without_a_claim_supported_by_a_quote(tmp_path: Path) -> N
     assert any("cannot finish" in e for e in errors)
     assert result.status is RunStatus.BUDGET_EXHAUSTED
     assert project.state.summary is None
+
+
+def test_finishing_on_too_few_sites_is_sent_back_once(tmp_path: Path) -> None:
+    llm = ScriptedLLM([call("finish_research", summary="done")] * 2)
+    agent, project = make_agent(tmp_path, llm, grounded=False)
+    quote = "a single site supports this finding entirely"
+    only = project.add_source(FetchedPage(url="https://one.example/a", title="One", text=quote))
+    project.add_claim("finding", "fact", [EvidenceInput(only.id, quote, "supports")])
+
+    assert agent.run().status is RunStatus.COMPLETED
+
+    (review,) = tool_results(llm.requests[-1])
+    assert "only 1 independent site(s)" in review["error"]
+    assert reopen_state(project).breadth_reviewed
+
+
+def reopen_state(project: Project) -> ResearchState:
+    return Project(project.root).state

@@ -171,6 +171,7 @@ def _apply(project: Project, source_id: str, result: StudyResult) -> dict[str, A
 
     created: list[str] = []
     problems: list[str] = []
+    new_claims = [project.get_claim(r["claim_id"]) for r in recorded]
     for concept in result.concepts:
         change = project.merge_concept(
             concept.title,
@@ -184,6 +185,12 @@ def _apply(project: Project, source_id: str, result: StudyResult) -> dict[str, A
             created.append(change.concept.id)
         problems += change.problems
 
+    # Readers often leave a claim's concepts empty; link every new claim to the concepts it
+    # names, so each concept gathers the evidence its explanations will be written from.
+    for claim in new_claims:
+        for concept_ref in mentioned_concepts(project, claim.text):
+            project.merge_concept(concept_ref, claim_ids=[claim.id])
+
     return {
         "claims_recorded": len(recorded),
         "claims": recorded,
@@ -194,3 +201,18 @@ def _apply(project: Project, source_id: str, result: StudyResult) -> dict[str, A
         "concept_problems": problems,
         "open_questions": result.open_questions,
     }
+
+
+def mentioned_concepts(project: Project, text: str) -> list[str]:
+    """Ids of known concepts whose title or an alias appears in `text` as whole words."""
+    haystack = f" {' '.join(words(text))} "
+    found = []
+    for concept in project.concepts():
+        names = [concept.title, *concept.aliases]
+        if any(
+            len(name) >= 3 and f" {' '.join(words(name))} " in haystack
+            for name in names
+            if words(name)
+        ):
+            found.append(concept.id)
+    return found

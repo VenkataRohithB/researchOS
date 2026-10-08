@@ -232,3 +232,27 @@ def test_focused_call_gives_up_after_two_attempts(tmp_path: Path) -> None:
             purpose="test", system="s", user="u", tool_name="answer", tool_description="d",
             result_model=Answer,
         )  # fmt: skip
+
+
+def test_claims_are_linked_to_the_concepts_they_name(project: Project) -> None:
+    (source,) = project.sources()
+    project.merge_concept("Memory bandwidth", aliases=["bandwidth"])
+    project.merge_concept("GPU")
+    reader = ScriptedLLM(
+        [
+            submit(
+                claims=[
+                    {
+                        "text": "The M4 chip supports up to 120 GB/s of memory bandwidth.",
+                        "quote": "The M4 chip supports up to 120 GB/s of memory bandwidth.",
+                    }
+                ]
+            )
+        ]
+    )
+
+    study(project, reader, source_id=source.id)
+
+    assert project.get_concept("memory-bandwidth").claim_ids == ["claim-0001"]
+    # "GPU" is a known concept but not named in the claim's text.
+    assert project.get_concept("gpu").claim_ids == []
