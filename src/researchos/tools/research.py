@@ -21,6 +21,7 @@ from researchos.project import (
     UnknownSourceError,
 )
 from researchos.state import Clarification, Phase
+from researchos.tools.explain import ExplainConceptsArgs, explain_concepts
 from researchos.tools.registry import Tool, ToolError
 from researchos.tools.study import StudySourceArgs, study_source
 from researchos.untrusted import untrusted
@@ -206,6 +207,11 @@ def build_research_tools(
                 f"this page has essentially the same content as {source.duplicate_of}; it does "
                 "not count as an independent source"
             )
+        else:
+            result["next_step"] = (
+                f"If this source is relevant, call study_source with source_id {source.id} to "
+                "record its claims and concepts; nothing from it is recorded until then."
+            )
         return result
 
     def read_source(args: ReadSourceArgs) -> dict[str, Any]:
@@ -302,6 +308,9 @@ def build_research_tools(
 
     def study(args: StudySourceArgs) -> dict[str, Any]:
         return study_source(project, focused, args)
+
+    def explain(args: ExplainConceptsArgs) -> dict[str, Any]:
+        return explain_concepts(project, focused, args)
 
     def ask_user(args: AskUserArgs) -> dict[str, Any]:
         asked = len(project.state.clarifications)
@@ -428,6 +437,12 @@ def build_research_tools(
                 "record the disagreement. If none can be found, call finish_research again; "
                 "those claims will be labelled as single-source or disputed."
             )
+        unexplained = [c.id for c in project.concepts() if c.claim_ids and not c.explanations]
+        if unexplained:
+            raise ToolError(
+                "cannot finish: these concepts have claims but no explanations yet: "
+                f"{', '.join(unexplained[:20])}. Use explain_concepts on them."
+            )
         if not any(project.assess(c).supporting_sources for c in project.claims()):
             raise ToolError(
                 "cannot finish: no claim is supported by a quote from a fetched source. "
@@ -459,6 +474,16 @@ def build_research_tools(
             ),
             args_model=StudySourceArgs,
             handler=study,
+        ),
+        Tool(
+            name="explain_concepts",
+            description=(
+                "Write explanations of concepts at five depths (summary, beginner, "
+                "intermediate, deep, expert), grounded in their claims with citations. Use it "
+                "once a concept's claims are in place; re-run it after adding claims."
+            ),
+            args_model=ExplainConceptsArgs,
+            handler=explain,
         ),
         Tool(
             name="list_concepts",
@@ -505,8 +530,9 @@ def build_research_tools(
         Tool(
             name="search_sources",
             description=(
-                "Find passages mentioning given words across fetched sources. Use it to locate "
-                "exact wording to quote, and to cross-check a claim in other sources."
+                "Find passages mentioning given words across fetched sources, for targeted "
+                "look-ups after studying them (e.g. to check one detail). It records nothing; "
+                "use study_source to read and record a source."
             ),
             args_model=SearchSourcesArgs,
             handler=search_sources,

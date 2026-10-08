@@ -80,6 +80,7 @@ def test_concept_tools_show_and_correct_the_graph(tmp_path: Path) -> None:
     )
     agent, project = make_agent(tmp_path, llm)
     project.merge_concept("Nanosheet", summary="A thin channel.", claim_ids=["claim-0001"])
+    project.set_explanations("nanosheet", {"summary": "A thin channel."})
 
     agent.run()
 
@@ -89,7 +90,7 @@ def test_concept_tools_show_and_correct_the_graph(tmp_path: Path) -> None:
     assert listed["total"] == 2
     assert "unknown concept 'nope'" in missing["error"]
     snapshot = llm.requests[-1][1].content or ""
-    assert "- Gate-all-around (0 claims)\n  - Nanosheet (1 claims)" in snapshot
+    assert "- Gate-all-around (0 claims)\n  - Nanosheet (1 claims, explained)" in snapshot
 
 
 class FakeUser:

@@ -39,6 +39,13 @@ There is no fixed sequence of steps.
 - Instructions and improvement requests from the person take priority. For an improvement
   request, add agenda items for it and build on what already exists rather than starting over.
 
+## Teaching
+
+- When a concept's claims are in place, write its explanations with `explain_concepts` (up to
+  five concepts per call), from the top of the graph downwards. Re-run it for a concept after
+  its claims change. Explanations are what the person reads, so every concept with claims must
+  be explained before you finish.
+
 ## Finishing
 
 - Mark an agenda item done only by passing the `claim_ids` that cover it. Drop an item you

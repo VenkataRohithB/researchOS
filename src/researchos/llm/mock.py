@@ -1,9 +1,11 @@
 """Offline stand-in for a real model.
 
 `MockLLM` does not reason. As the agent it follows a fixed plan -> search -> fetch -> study ->
-close -> finish trajectory, deciding each step from the state snapshot; asked to study a
-source it returns one claim quoting the mock page. This exercises the real harness end to end (tool
-validation, quote checks, persistence, budget accounting) without credentials or network.
+explain -> close -> finish trajectory, deciding each step from the state snapshot. Asked to
+study a source it returns one claim quoting the mock page; asked to explain a concept it
+returns placeholder text citing the concept's claims. This exercises the real harness end to
+end (tool validation, quote checks, persistence, budget accounting) without credentials or
+network access.
 """
 
 from __future__ import annotations
@@ -31,6 +33,8 @@ class MockLLM:
     def chat(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> LLMResponse:
         if any(tool.name == "submit_study" for tool in tools):
             return self._respond(messages, self._study(messages))
+        if any(tool.name == "submit_explanations" for tool in tools):
+            return self._respond(messages, self._explain(messages))
         return self._respond(messages, self._next_step(messages))
 
     def _next_step(self, messages: Sequence[Message]) -> Message:
@@ -41,6 +45,7 @@ class MockLLM:
         open_items = re.findall(r"^- (a\d+) \[open\]", snapshot, re.MULTILINE)
         unstudied = re.findall(r"(src-[0-9a-f]+) \[[a-z]+, not studied yet", snapshot)
         claims = re.findall(r"^- (claim-\d+) \[", snapshot, re.MULTILINE)
+        unexplained = re.findall(r"^\s*- (.+) \([1-9]\d* claims\)$", snapshot, re.MULTILINE)
         no_sources = "## Sources fetched (0)" in snapshot
         finish = self._call("finish_research", summary=f"Mock research on '{topic}' complete.")
 
@@ -58,6 +63,8 @@ class MockLLM:
             return self._call("search_web", query=topic, max_results=3)
         if unstudied:
             return self._call("study_source", source_id=unstudied[0])
+        if unexplained:
+            return self._call("explain_concepts", concepts=unexplained[:5])
         if open_items and claims:
             covered = [{"id": item, "status": "done", "claim_ids": claims} for item in open_items]
             return self._call("update_agenda", update=covered)
@@ -79,6 +86,19 @@ class MockLLM:
                 }
             ],
             concepts=[{"title": topic, "summary": f"The subject being researched: {topic}."}],
+        )
+
+    def _explain(self, messages: Sequence[Message]) -> Message:
+        request = next((m.content for m in messages if m.role == "user" and m.content), "")
+        cite = "[" + ", ".join(re.findall(r"^- (claim-\d+) \(", request, re.MULTILINE)) + "]"
+        concept = re.search(r"^Concept: (.+)$", request, re.MULTILINE)
+        name = concept.group(1) if concept else "the concept"
+        return self._call(
+            "submit_explanations",
+            **{
+                level: f"A {level} explanation of {name} for testing. {cite}"
+                for level in ("summary", "beginner", "intermediate", "deep", "expert")
+            },
         )
 
     def _respond(self, messages: Sequence[Message], reply: Message) -> LLMResponse:

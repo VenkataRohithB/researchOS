@@ -14,3 +14,17 @@ search:
   formats:
     - html
     - json
+
+# Spread queries over several independent engines. A research agent searches often, and any
+# single engine may throttle it for a while; with several enabled, results keep coming.
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: mwmbl
+    disabled: false

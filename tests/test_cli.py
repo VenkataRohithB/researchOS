@@ -34,7 +34,7 @@ def test_new_status_steer_resume_list(workspace: Path, capsys: pytest.CaptureFix
 
     out = capsys.readouterr().out
     assert "Status:   completed" in out
-    assert "Progress: 8 steps over 2 run(s)" in out
+    assert "Progress: 9 steps over 2 run(s)" in out
     assert "- compare with x86" in out
     assert f"{project_id}  [completed]" in out
 

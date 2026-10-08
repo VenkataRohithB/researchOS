@@ -23,12 +23,12 @@ def test_state_and_transcript_are_persisted(tmp_path: Path) -> None:
 
     state = reopen(project).state
     assert state.status is RunStatus.COMPLETED
-    assert state.step == 7
+    assert state.step == 8
     assert state.agenda[0].text == "Understand the basics of test topic"
     assert state.agenda[0].status == "done"
     assert state.summary == "Mock research on 'test topic' complete."
-    assert state.runs[0].usage is not None and state.runs[0].usage.llm_calls == 8
-    assert len(Transcript(project.transcript_path)) == 7
+    assert state.runs[0].usage is not None and state.runs[0].usage.llm_calls == 10
+    assert len(Transcript(project.transcript_path)) == 8
 
 
 def test_resume_continues_where_the_previous_run_stopped(tmp_path: Path) -> None:
@@ -39,10 +39,10 @@ def test_resume_continues_where_the_previous_run_stopped(tmp_path: Path) -> None
     result = agent_for(project, MockLLM(), run_id="second").run()
 
     assert result.status is RunStatus.COMPLETED
-    assert result.usage.steps == 5  # fetch, claim, close, review, finish: no redone planning
+    assert result.usage.steps == 6  # fetch, study, explain, close, review, finish; no re-planning
     state = reopen(project).state
     assert [r.status for r in state.runs] == [RunStatus.BUDGET_EXHAUSTED, RunStatus.COMPLETED]
-    assert state.step == 7
+    assert state.step == 8
     assert len(project.sources()) == 1
 
 
