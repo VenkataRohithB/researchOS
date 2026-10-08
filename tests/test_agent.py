@@ -19,10 +19,14 @@ def test_mock_model_completes_full_research_loop(tmp_path: Path) -> None:
 
     assert result.status is RunStatus.COMPLETED
     assert [s.url for s in project.sources()] == [MOCK_URL]
-    assert project.notes()[0].source_ids == [project.sources()[0].id]
+    (claim,) = project.claims()
+    assert [e.source_id for e in claim.evidence] == [project.sources()[0].id]
+    assert project.assess(claim).status == "single_source"
     assert "## Summary" in result.report_path.read_text()
     events = [json.loads(line) for line in project.events_path.read_text().splitlines()]
-    assert [e["event"] for e in events].count("llm_call") == 5
+    assert [e["event"] for e in events].count(
+        "llm_call"
+    ) == 7  # includes one finish sent back for review
     assert events[-1]["event"] == "run_end"
 
 
@@ -47,10 +51,11 @@ def test_invalid_arguments_and_unknown_tools_are_observations_not_crashes(
     assert result.usage.tool_errors == 2
 
 
-def test_notes_cannot_cite_sources_that_were_never_fetched(tmp_path: Path) -> None:
+def test_claims_cannot_cite_sources_that_were_never_fetched(tmp_path: Path) -> None:
+    evidence = [{"source_id": "src-invented", "quote": "a quote that was never fetched"}]
     llm = ScriptedLLM(
         [
-            call("save_note", text="claim", source_ids=["src-invented"]),
+            call("record_claim", text="claim", evidence=evidence),
             call("finish_research", summary="done"),
         ]
     )
@@ -59,7 +64,7 @@ def test_notes_cannot_cite_sources_that_were_never_fetched(tmp_path: Path) -> No
     agent.run()
 
     assert "unknown source_id 'src-invented'" in tool_results(llm.requests[-1])[0]["error"]
-    assert [n.text for n in project.notes()] == ["seed finding"]
+    assert [c.text for c in project.claims()] == ["seed finding"]
 
 
 def test_fetched_content_is_wrapped_as_untrusted(tmp_path: Path) -> None:
@@ -128,14 +133,14 @@ def test_untrusted_content_cannot_close_its_own_block() -> None:
     assert wrapped.endswith("<<<END_UNTRUSTED_CONTENT>>>")
 
 
-def test_cannot_finish_without_a_note_citing_a_fetched_source(tmp_path: Path) -> None:
+def test_cannot_finish_without_a_claim_supported_by_a_quote(tmp_path: Path) -> None:
     llm = ScriptedLLM(
         [
             call("finish_research", summary="From memory"),
-            call("save_note", text="uncited claim"),
+            call("record_claim", text="my own conclusion", kind="inference"),
             call("finish_research", summary="Still from memory"),
             call("fetch_source", url=MOCK_URL),
-            call("save_note", text="cited", source_ids=["src-placeholder"]),
+            call("record_claim", text="unquoted fact"),
         ]
     )
     agent, project = make_agent(tmp_path, llm, grounded=False, max_steps=5)

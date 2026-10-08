@@ -26,13 +26,29 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 from markupsafe import Markup, escape
 
-from researchos.project import Note, Project
+from researchos.evidence import Claim
+from researchos.project import Project
 from researchos.state import RunStatus
 
-_NOTE_REF = re.compile(r"\bnote-\d{4}\b")
+# Agenda notes refer to claims by id; older projects refer to the notes claims replaced.
+_FINDING_REF = re.compile(r"\b(?:claim|note)-(\d{4})\b")
 # Valid in JSON strings but line terminators in JavaScript source.
 _LINE_SEPARATOR = chr(0x2028)
 _PARAGRAPH_SEPARATOR = chr(0x2029)
+
+_TIER_LABELS = {
+    "paper": "Research paper",
+    "academic": "Academic",
+    "standard": "Standard",
+    "government": "Government",
+    "official": "Official",
+    "reference": "Reference work",
+    "news": "News",
+    "community": "Community",
+    "other": "Web page",
+}
+
+_STANCE_LABELS = {"supports": "Supports", "contradicts": "Contradicts", "qualifies": "Qualifies"}
 
 _RUN_STATUS_LABELS = {
     RunStatus.RUNNING: "Running",
@@ -67,6 +83,10 @@ class SiteSource:
     url: str
     domain: str
     fetched: str
+    published: str | None
+    tier: str
+    duplicate_of: int | None
+    """Number of the source this one duplicates."""
     cited_by: list[tuple[str, int]]
     """(finding anchor, finding number) for each finding that cites this source."""
 
@@ -80,11 +100,24 @@ class Citation:
 
 
 @dataclass(frozen=True)
+class SiteEvidence:
+    stance: str
+    quote: str
+    citation: Citation
+
+
+@dataclass(frozen=True)
 class SiteFinding:
     anchor: str
     label: str
     html: Markup
+    kind: str | None
+    """"Interpretation" or "Inference"; None for facts."""
+    status: str
+    status_label: str
+    note: str | None
     citations: list[Citation]
+    evidence: list[SiteEvidence]
 
 
 @dataclass(frozen=True)
@@ -115,6 +148,7 @@ class SiteData:
     summary_html: Markup | None
     summary_toc: list[TocEntry]
     findings: list[SiteFinding]
+    verified: int
     sources: list[SiteSource]
     agenda: list[SiteAgendaItem]
     runs: list[SiteRun]
@@ -138,22 +172,30 @@ def collect(project: Project) -> SiteData:
     """Gather the project's research into template-ready, already-escaped values."""
     request = project.metadata.request
     state = project.state
-    notes = project.notes()
+    claims = project.claims()
     sources = project.sources()
 
     # Number sources in order of first citation, then the uncited ones.
     order: list[str] = []
-    for note in notes:
-        order += [sid for sid in note.source_ids if sid not in order]
+    for claim in claims:
+        order += [e.source_id for e in claim.evidence if e.source_id not in order]
     order += [s.id for s in sources if s.id not in order]
     by_id = {s.id: s for s in sources}
     numbers = {sid: n for n, sid in enumerate(order, start=1)}
 
-    finding_numbers = {note.id: n for n, note in enumerate(notes, start=1)}
+    finding_numbers = {claim.id: n for n, claim in enumerate(claims, start=1)}
     cited_by: dict[str, list[tuple[str, int]]] = {sid: [] for sid in order}
-    for note in notes:
-        for sid in dict.fromkeys(note.source_ids):
-            cited_by[sid].append((note.id, finding_numbers[note.id]))
+    for claim in claims:
+        for sid in dict.fromkeys(e.source_id for e in claim.evidence):
+            cited_by[sid].append((claim.id, finding_numbers[claim.id]))
+
+    def citation(source_id: str) -> Citation:
+        return Citation(
+            number=numbers[source_id],
+            anchor=f"source-{numbers[source_id]}",
+            title=by_id[source_id].title,
+            domain=_domain(by_id[source_id].url),
+        )
 
     site_sources = [
         SiteSource(
@@ -163,29 +205,42 @@ def collect(project: Project) -> SiteData:
             url=by_id[sid].url,
             domain=_domain(by_id[sid].url),
             fetched=_date(by_id[sid].fetched_at, month="%b"),
+            published=by_id[sid].published,
+            tier=_TIER_LABELS[by_id[sid].tier],
+            duplicate_of=numbers.get(by_id[sid].duplicate_of or ""),
             cited_by=cited_by[sid],
         )
         for sid in order
     ]
 
     md = _markdown()
-    findings = [
-        SiteFinding(
-            anchor=note.id,
-            label=f"Finding {finding_numbers[note.id]}",
-            html=_trusted(md.renderInline(note.text)),
-            citations=[
-                Citation(
-                    number=numbers[sid],
-                    anchor=f"source-{numbers[sid]}",
-                    title=by_id[sid].title,
-                    domain=_domain(by_id[sid].url),
-                )
-                for sid in dict.fromkeys(note.source_ids)
-            ],
+    findings: list[SiteFinding] = []
+    for claim in claims:
+        assessment = project.assess(claim)
+        findings.append(
+            SiteFinding(
+                anchor=claim.id,
+                label=f"Finding {finding_numbers[claim.id]}",
+                html=_trusted(md.renderInline(claim.text)),
+                kind=None if claim.kind == "fact" else claim.kind.capitalize(),
+                status=assessment.status,
+                status_label=_status_label(
+                    assessment.status, assessment.supporting_sources, claim.kind
+                ),
+                note=claim.note,
+                citations=[
+                    citation(sid) for sid in dict.fromkeys(e.source_id for e in claim.evidence)
+                ],
+                evidence=[
+                    SiteEvidence(
+                        stance=_STANCE_LABELS[e.stance],
+                        quote=e.quote,
+                        citation=citation(e.source_id),
+                    )
+                    for e in claim.evidence
+                ],
+            )
         )
-        for note in notes
-    ]
 
     summary_html, toc, sections = (
         (None, [], []) if not state.summary else _render_summary(md, state.summary)
@@ -212,10 +267,12 @@ def collect(project: Project) -> SiteData:
         summary_html=summary_html,
         summary_toc=toc,
         findings=findings,
+        verified=sum(1 for f in findings if f.status == "verified"),
         sources=site_sources,
         agenda=[
             SiteAgendaItem(
-                status=item.status, html=_agenda_html(item.text, item.note, finding_numbers)
+                status=item.status,
+                html=_agenda_html(item.text, item.note, item.claim_ids, finding_numbers),
             )
             for item in state.agenda
         ],
@@ -231,7 +288,7 @@ def collect(project: Project) -> SiteData:
             for run in state.runs
         ],
     )
-    data.search_index = _search_index(sections, findings, notes, site_sources)
+    data.search_index = _search_index(sections, findings, claims, site_sources)
     return data
 
 
@@ -316,24 +373,50 @@ def _render_summary(
     return html, toc, [s for s in sections if s.text.strip()]
 
 
-def _agenda_html(text: str, note: str | None, finding_numbers: dict[str, int]) -> Markup:
-    """Escape an agenda item; in its note, turn references like "note-0003" into links
-    labelled with the finding's number as shown on the page."""
+def _agenda_html(
+    text: str, note: str | None, claim_ids: list[str], finding_numbers: dict[str, int]
+) -> Markup:
+    """Escape an agenda item and list the findings that cover it. In its note, references
+    like "claim-0003" become links labelled with the finding's number as shown on the page."""
+    covered = [
+        Markup('<a href="#{}">Finding {}</a>').format(cid, finding_numbers[cid])
+        for cid in claim_ids
+        if cid in finding_numbers
+    ]
+    if covered:
+        coverage = Markup('<span class="agenda-note">Covered by {}.</span>').format(
+            Markup(", ").join(covered)
+        )
+        text_html = Markup("{}{}").format(text, coverage)
+    else:
+        text_html = escape(text)
     if not note:
-        return escape(text)
+        return text_html
     pieces: list[Markup] = []
     last = 0
-    for match in _NOTE_REF.finditer(note):
+    for match in _FINDING_REF.finditer(note):
         pieces.append(escape(note[last : match.start()]))
-        ref = match.group(0)
-        if ref in finding_numbers:
-            label = f"Finding {finding_numbers[ref]}"
-            pieces.append(Markup('<a href="#{}">{}</a>').format(ref, label))
+        claim_id = f"claim-{match.group(1)}"
+        if claim_id in finding_numbers:
+            label = f"Finding {finding_numbers[claim_id]}"
+            pieces.append(Markup('<a href="#{}">{}</a>').format(claim_id, label))
         else:
-            pieces.append(escape(ref))
+            pieces.append(escape(match.group(0)))
         last = match.end()
     pieces.append(escape(note[last:]))
-    return Markup('{}<span class="agenda-note">{}</span>').format(text, Markup("").join(pieces))
+    return Markup('{}<span class="agenda-note">{}</span>').format(
+        text_html, Markup("").join(pieces)
+    )
+
+
+def _status_label(status: str, supporting: int, kind: str) -> str:
+    if status == "verified":
+        return f"Verified by {supporting} independent sources"
+    if status == "single_source":
+        return "Single source"
+    if status == "disputed":
+        return "Sources disagree"
+    return "Not backed by a source" if kind == "fact" else "No quoted support"
 
 
 # Helpers --------------------------------------------------------------------------------
@@ -342,7 +425,7 @@ def _agenda_html(text: str, note: str | None, finding_numbers: dict[str, int]) -
 def _search_index(
     sections: list[SummarySection],
     findings: list[SiteFinding],
-    notes: list[Note],
+    claims: list[Claim],
     sources: list[SiteSource],
 ) -> list[dict[str, str]]:
     index = [
@@ -350,8 +433,8 @@ def _search_index(
         for sec in sections
     ]
     index += [
-        {"kind": "Finding", "title": finding.label, "text": note.text, "href": f"#{note.id}"}
-        for finding, note in zip(findings, notes, strict=True)
+        {"kind": "Finding", "title": finding.label, "text": claim.text, "href": f"#{claim.id}"}
+        for finding, claim in zip(findings, claims, strict=True)
     ]
     index += [
         {

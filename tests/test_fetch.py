@@ -82,3 +82,58 @@ def test_rejects_unsupported_content_and_oversized_bodies() -> None:
 def test_http_errors_become_fetch_errors() -> None:
     with pytest.raises(FetchError, match="HTTP 404"):
         fetcher(lambda _: httpx.Response(404)).fetch(PUBLIC)
+
+
+def make_pdf(text: str, title: str) -> bytes:
+    """A minimal valid single-page PDF with one line of text and document metadata."""
+    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        f"<< /Title ({title}) /CreationDate (D:20240115093000Z) >>".encode(),
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R /Info 6 0 R >>\n" % (len(objects) + 1)
+    out += b"startxref\n%d\n%%%%EOF\n" % xref
+    return bytes(out)
+
+
+def test_extracts_text_title_and_date_from_pdf() -> None:
+    pdf = make_pdf("Nanosheets improve gate control.", "GAA Paper")
+    response = httpx.Response(200, content=pdf, headers={"content-type": "application/pdf"})
+
+    page = fetcher(lambda _: response).fetch(f"{PUBLIC}/paper.pdf")
+
+    assert "Nanosheets improve gate control." in page.text
+    assert page.title == "GAA Paper"
+    assert page.published == "2024-01-15"
+
+
+def test_broken_pdf_is_a_fetch_error() -> None:
+    response = httpx.Response(
+        200, content=b"%PDF-1.4 garbage", headers={"content-type": "application/pdf"}
+    )
+
+    with pytest.raises(FetchError, match=r"could not read the PDF|no extractable text"):
+        fetcher(lambda _: response).fetch(f"{PUBLIC}/broken.pdf")
+
+
+def test_html_publication_date_is_extracted() -> None:
+    dated = ARTICLE.replace(
+        "<head>", '<head><meta property="article:published_time" content="2025-03-04">'
+    )
+
+    page = fetcher(lambda _: httpx.Response(200, html=dated)).fetch(f"{PUBLIC}/gaa")
+
+    assert page.published == "2025-03-04"

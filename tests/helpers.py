@@ -9,12 +9,13 @@ from typing import Any
 
 from researchos.agent import ResearchAgent
 from researchos.llm import LLMClient, LLMResponse, Message, ToolCall, ToolSpec, Usage
-from researchos.project import Project, ResearchRequest
+from researchos.project import EvidenceInput, Project, ResearchRequest
 from researchos.tools import ToolRegistry, build_research_tools
 from researchos.usage import Limits, Pricing, UsageMeter
 from researchos.web import FetchedPage, MockFetcher, MockSearch
 
 SEED_URL = "https://seed.example/background"
+SEED_QUOTE = "The seeded source states this background finding plainly"
 
 
 def call(name: str, **arguments: Any) -> Message:
@@ -52,9 +53,9 @@ def make_agent(
     project = Project.create(tmp_path, ResearchRequest(topic="test topic"))
     if grounded:
         seed = project.add_source(
-            FetchedPage(url=SEED_URL, title="Seed source", text="Seed source text.")
+            FetchedPage(url=SEED_URL, title="Seed source", text=f"Background. {SEED_QUOTE}.")
         )
-        project.add_note("seed finding", [seed.id])
+        project.add_claim("seed finding", "fact", [EvidenceInput(seed.id, SEED_QUOTE, "supports")])
     return agent_for(project, llm, **options), project
 
 

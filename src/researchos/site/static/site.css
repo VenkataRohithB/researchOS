@@ -13,6 +13,8 @@
   --open: #dce1e8;
   --notice: #fff4d6;
   --notice-rule: #e0bf4a;
+  --verified: #1f7a55;
+  --disputed: #b4441f;
 
   --serif: "Iowan Old Style", "Charter", "Bitstream Charter", "Sitka Text", Cambria,
     "Noto Serif", "DejaVu Serif", Georgia, serif;
@@ -39,6 +41,8 @@
     --open: #2a313c;
     --notice: #2b2610;
     --notice-rule: #8a7420;
+  --verified: #5cc79a;
+  --disputed: #f08a64;
     color-scheme: dark;
   }
 }
@@ -56,6 +60,8 @@
   --open: #2a313c;
   --notice: #2b2610;
   --notice-rule: #8a7420;
+  --verified: #5cc79a;
+  --disputed: #f08a64;
   color-scheme: dark;
 }
 
@@ -243,7 +249,8 @@ main { padding: 4rem clamp(1.25rem, 5vw, 5rem) 3rem; max-width: 70rem; outline: 
 }
 .finding:last-child { border-bottom: 1px solid var(--rule); }
 .finding-text p { margin: 0; }
-.finding:target .finding-text p { background: var(--mark); color: var(--mark-ink); box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 0 0.1em; }
+.finding-text .finding-status { margin-bottom: 0.35rem; }
+.finding:target .finding-claim { background: var(--mark); color: var(--mark-ink); box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 0 0.1em; }
 
 .cite {
   position: relative;
@@ -263,6 +270,36 @@ main { padding: 4rem clamp(1.25rem, 5vw, 5rem) 3rem; max-width: 70rem; outline: 
 }
 .cite-tip span { display: block; opacity: 0.75; margin-top: 0.15rem; }
 .cite:hover .cite-tip, .cite:focus-visible .cite-tip { visibility: visible; opacity: 1; }
+
+.finding-status {
+  font-family: var(--sans); font-size: 0.8rem; font-weight: 600;
+  margin: 0 0 0.35rem; color: var(--muted);
+  display: flex; gap: 0.6rem; align-items: baseline;
+}
+.finding-status::before {
+  content: ""; width: 0.55rem; height: 0.55rem; border-radius: 50%;
+  border: 1.5px solid currentColor; flex: none; align-self: center;
+}
+.finding-status.status-verified { color: var(--verified); }
+.finding-status.status-verified::before { background: currentColor; }
+.finding-status.status-single_source::before { background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
+.finding-status.status-disputed { color: var(--disputed); }
+.finding-status.status-disputed::before { border-radius: 1px; transform: rotate(45deg); background: currentColor; }
+.finding-kind { font-weight: 500; color: var(--muted); }
+.finding-text .finding-note { margin-top: 0.6rem; font-family: var(--sans); font-size: 0.88rem; color: var(--muted); }
+
+.evidence { margin-top: 0.75rem; font-family: var(--sans); font-size: 0.88rem; }
+.evidence summary { cursor: pointer; color: var(--link); width: fit-content; }
+.evidence summary:hover { text-decoration: underline; text-underline-offset: 0.18em; }
+.evidence ul { list-style: none; margin: 0.75rem 0 0; padding: 0; }
+.evidence-item { margin-bottom: 0.9rem; }
+.evidence-item blockquote {
+  margin: 0; padding: 0.15rem 0 0.15rem 0.9rem; border-left: 3px solid var(--rule);
+  font-family: var(--serif); font-size: 0.98rem; font-style: italic; color: var(--ink);
+}
+.evidence-item.stance-supports blockquote { border-left-color: var(--verified); }
+.evidence-item.stance-contradicts blockquote { border-left-color: var(--disputed); }
+.finding-text .evidence-item p { margin: 0.3rem 0 0 0.9rem; color: var(--muted); font-size: 0.8rem; }
 
 .finding-sources {
   list-style: none; margin: 0; padding: 0.2rem 0 0;

@@ -49,6 +49,8 @@ class AgendaItem(BaseModel):
     text: str
     status: AgendaStatus = "open"
     note: str | None = None
+    claim_ids: list[str] = Field(default_factory=list)
+    """Claims that cover this item; required for it to count as done."""
 
 
 class RunRecord(BaseModel):
@@ -68,6 +70,8 @@ class ResearchState(BaseModel):
     agenda: list[AgendaItem] = Field(default_factory=list)
     summary: str | None = None
     """Synthesis from the most recent `finish_research`."""
+    reviewed_claims: list[str] = Field(default_factory=list)
+    """Weakly supported claims the agent has already been asked to cross-check."""
     runs: list[RunRecord] = Field(default_factory=list)
 
     @property
@@ -94,9 +98,16 @@ class ResearchState(BaseModel):
         self.agenda.extend(items)
         return items
 
-    def set_agenda_status(self, item_id: str, status: AgendaStatus, note: str | None) -> None:
+    def set_agenda_status(
+        self,
+        item_id: str,
+        status: AgendaStatus,
+        note: str | None,
+        claim_ids: list[str] | None = None,
+    ) -> None:
         for item in self.agenda:
             if item.id == item_id:
                 item.status, item.note = status, note
+                item.claim_ids = list(claim_ids or []) if status == "done" else []
                 return
         raise KeyError(item_id)

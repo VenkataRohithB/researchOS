@@ -4,7 +4,7 @@ Instead of an ever-growing chat history, every step the model receives:
 
 1. the system prompt,
 2. a freshly rendered snapshot of the research state (request, user instructions, phase,
-   agenda, sources, recent notes, budget), and
+   agenda, sources, recent claims with their status, budget), and
 3. the last few complete turns from the transcript, for short-term continuity.
 
 The prompt therefore stays roughly constant in size however long the research runs, and a
@@ -14,6 +14,7 @@ resumed run sees the same kind of context as an uninterrupted one.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import resources
@@ -25,7 +26,7 @@ from researchos.project import Project
 from researchos.untrusted import untrusted
 from researchos.usage import Limits, UsageSummary
 
-MAX_NOTES_IN_CONTEXT = 30
+MAX_CLAIMS_IN_CONTEXT = 30
 MAX_SOURCES_IN_CONTEXT = 50
 MAX_DIRECTIVES_IN_CONTEXT = 10
 
@@ -109,7 +110,9 @@ def render_snapshot(project: Project, *, usage: UsageSummary, limits: Limits) ->
     out += ["", "## Agenda"]
     if state.agenda:
         out += [
-            f"- {item.id} [{item.status}] {item.text}" + (f" — {item.note}" if item.note else "")
+            f"- {item.id} [{item.status}] {item.text}"
+            + (f" (claims: {', '.join(item.claim_ids)})" if item.claim_ids else "")
+            + (f" — {item.note}" if item.note else "")
             for item in state.agenda
         ]
     else:
@@ -122,23 +125,36 @@ def render_snapshot(project: Project, *, usage: UsageSummary, limits: Limits) ->
     out += ["", f"## Sources fetched ({len(sources)})"]
     if sources:
         shown = sources[-MAX_SOURCES_IN_CONTEXT:]
-        listing = "\n".join(f"{s.id}: {s.title} <{s.url}>" for s in shown)
+        listing = "\n".join(
+            f"{s.id} [{s.tier}"
+            + (f", duplicate of {s.duplicate_of}" if s.duplicate_of else "")
+            + f"]: {s.title} <{s.url}>"
+            for s in shown
+        )
         out.append(untrusted(listing, "source-titles"))
         if len(sources) > len(shown):
             out.append(f"({len(sources) - len(shown)} older sources not shown.)")
     else:
         out.append("None yet.")
 
-    notes = project.notes()
-    out += ["", f"## Notes ({len(notes)})"]
-    if notes:
-        if len(notes) > MAX_NOTES_IN_CONTEXT:
+    claims = project.claims()
+    assessments = {c.id: project.assess(c) for c in claims}
+    counts = Counter(a.status for a in assessments.values())
+    out += [
+        "",
+        f"## Claims ({len(claims)}: {counts['verified']} verified, "
+        f"{counts['single_source']} single-source, {counts['disputed']} disputed, "
+        f"{counts['unsupported']} unsupported)",
+    ]
+    if claims:
+        if len(claims) > MAX_CLAIMS_IN_CONTEXT:
             out.append(
-                f"Showing the latest {MAX_NOTES_IN_CONTEXT}; use read_notes to see older ones."
+                f"Showing the latest {MAX_CLAIMS_IN_CONTEXT}; use list_claims to see the rest."
             )
-        for note in notes[-MAX_NOTES_IN_CONTEXT:]:
-            cites = f" [{', '.join(note.source_ids)}]" if note.source_ids else ""
-            out.append(f"- {note.id}{cites}: {note.text}")
+        for claim in claims[-MAX_CLAIMS_IN_CONTEXT:]:
+            a = assessments[claim.id]
+            status = a.status.replace("_", "-")
+            out.append(f"- {claim.id} [{claim.kind}, {status}]: {claim.text}")
     else:
         out.append("None yet.")
 

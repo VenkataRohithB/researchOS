@@ -1,6 +1,6 @@
 """Offline stand-in for a real model.
 
-`MockLLM` does not reason. It follows a fixed plan -> search -> fetch -> note -> finish
+`MockLLM` does not reason. It follows a fixed plan -> search -> fetch -> claim -> close -> finish
 trajectory, reading the previous tool results so it exercises the real harness end to end
 (tool validation, persistence, budget accounting) without credentials or network access.
 """
@@ -14,6 +14,9 @@ from typing import Any
 
 from researchos.llm.types import LLMResponse, Message, ToolCall, ToolSpec, Usage
 
+# A passage every page served by `MockFetcher` contains, so mock claims carry a real quote.
+MOCK_PAGE_QUOTE = "It exists only to exercise the research harness offline"
+
 _CHARS_PER_TOKEN = 4
 
 
@@ -24,12 +27,14 @@ class MockLLM:
         self._ids = count(1)
 
     def chat(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> LLMResponse:
-        called = {call.name for m in messages if m.role == "assistant" for call in m.tool_calls}
+        names = [call.name for m in messages if m.role == "assistant" for call in m.tool_calls]
+        called = set(names)
         last_result = _last_tool_result(messages)
         topic = _topic(messages)
 
         if last_result is not None and "error" in last_result:
-            message = self._call("finish_research", summary="Stopped: a tool reported an error.")
+            # Usually the pre-finish review; this script cannot act on errors, so it finishes.
+            message = self._call("finish_research", summary=f"Mock research on '{topic}' complete.")
         elif "update_agenda" not in called:
             message = self._call("update_agenda", add=[f"Understand the basics of {topic}"])
         elif "search_web" not in called:
@@ -40,13 +45,17 @@ class MockLLM:
                 message = self._call("finish_research", summary="No search results were found.")
             else:
                 message = self._call("fetch_source", url=results[0]["url"])
-        elif "save_note" not in called:
+        elif "record_claim" not in called:
             source_id = (last_result or {}).get("source_id")
             message = self._call(
-                "save_note",
-                text=f"Key points about {topic}.",
-                source_ids=[source_id] if source_id else [],
+                "record_claim",
+                text=f"The fetched page about {topic} is synthetic test content.",
+                kind="fact",
+                evidence=[{"source_id": source_id, "quote": MOCK_PAGE_QUOTE}] if source_id else [],
             )
+        elif names.count("update_agenda") < 2 and "claim_id" in (last_result or {}):
+            covered = {"id": "a1", "status": "done", "claim_ids": [(last_result or {})["claim_id"]]}
+            message = self._call("update_agenda", update=[covered])
         else:
             message = self._call("finish_research", summary=f"Mock research on '{topic}' complete.")
 

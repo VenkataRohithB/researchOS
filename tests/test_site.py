@@ -7,11 +7,17 @@ import json
 import re
 from pathlib import Path
 
-from researchos.project import Project, ResearchRequest
+from researchos.project import EvidenceInput, Project, ResearchRequest
 from researchos.site import build_site
 from researchos.state import RunStatus
 from researchos.usage import UsageSummary
 from researchos.web import FetchedPage
+
+PAPER_TEXT = (
+    "In a gate-all-around transistor the gate wraps around the channel on all sides. "
+    "In these devices stacked horizontal nanosheet channels replace fins."
+)
+OTHER_TEXT = "Unlike FinFETs, nanosheets are stacked horizontal silicon channels."
 
 USAGE = UsageSummary(
     steps=3,
@@ -28,15 +34,31 @@ USAGE = UsageSummary(
 def make_project(tmp_path: Path, *, topic: str = "Gate-all-around transistors") -> Project:
     project = Project.create(tmp_path, ResearchRequest(topic=topic, goal="Understand GAA"))
     paper = project.add_source(
-        FetchedPage(url="https://www.example.org/gaa", title="GAA explained", text="t")
+        FetchedPage(url="https://www.example.org/gaa", title="GAA explained", text=PAPER_TEXT)
     )
     other = project.add_source(
-        FetchedPage(url="https://ieee.example/nanosheet", title="Nanosheets", text="t")
+        FetchedPage(url="https://ieee.example/nanosheet", title="Nanosheets", text=OTHER_TEXT)
     )
-    project.add_note("The gate surrounds the channel on **all four sides**.", [paper.id])
-    project.add_note("Nanosheets stack horizontal channels.", [other.id, paper.id])
+    project.add_claim(
+        "The gate surrounds the channel on **all four sides**.",
+        "fact",
+        [EvidenceInput(paper.id, "the gate wraps around the channel on all sides", "supports")],
+    )
+    project.add_claim(
+        "Nanosheets stack horizontal channels.",
+        "fact",
+        [
+            EvidenceInput(
+                other.id, "nanosheets are stacked horizontal silicon channels", "supports"
+            ),
+            EvidenceInput(
+                paper.id, "stacked horizontal nanosheet channels replace fins", "supports"
+            ),
+        ],
+    )
     project.state.add_agenda_items(["What is GAA?", "Why nanosheets?"])
     project.state.set_agenda_status("a1", "done", "Covered by note-0001 and note-0002.")
+    project.state.set_agenda_status("a2", "done", None, ["claim-0002"])
     project.state.summary = (
         "# GAA\n\nIntro.\n\n## How it works\n\nDetails [docs](https://x.example)."
     )
@@ -59,10 +81,17 @@ def test_renders_findings_sources_agenda_and_log(tmp_path: Path) -> None:
     assert re.search(r'id="source-1".*?GAA explained', html, re.S)
     assert re.search(r'id="source-2".*?Nanosheets', html, re.S)
     assert 'href="#source-2" aria-label="Source 2: Nanosheets"' in html
-    assert 'Cited in findings <a href="#note-0001">1</a>, <a href="#note-0002">2</a>' in html
-    # Agenda notes link to findings by the label readers see.
-    assert '<a href="#note-0001">Finding 1</a> and <a href="#note-0002">Finding 2</a>' in html
-    assert "1 of 2 research questions covered" in html
+    assert 'Cited in findings <a href="#claim-0001">1</a>, <a href="#claim-0002">2</a>' in html
+    # Agenda notes link to findings by the label readers see; legacy note ids map to claims.
+    assert '<a href="#claim-0001">Finding 1</a> and <a href="#claim-0002">Finding 2</a>' in html
+    # Status comes from evidence: two independent sites verify the second claim.
+    assert "Single source" in html
+    assert "Verified by 2 independent sources" in html
+    assert "1 of them is confirmed by independent sources." in html
+    assert "<blockquote>nanosheets are stacked horizontal silicon channels</blockquote>" in html
+    assert "Web page from example.org" in html
+    assert "2 of 2 research questions covered" in html
+    assert 'Covered by <a href="#claim-0002">Finding 2</a>.' in html
     assert "1,500" in html and "$0.0123" in html and "1m 15s" in html
 
 
@@ -77,7 +106,9 @@ def test_summary_headings_get_anchors_listed_in_contents(tmp_path: Path) -> None
 
 def test_untrusted_content_cannot_inject_markup_or_script(tmp_path: Path) -> None:
     project = make_project(tmp_path, topic="<script>alert('topic')</script>")
-    project.add_note('<img src=x onerror="alert(1)"> </script><script>alert(2)</script>', [])
+    project.add_claim(
+        '<img src=x onerror="alert(1)"> </script><script>alert(2)</script>', "inference", []
+    )
     project.state.summary = "[click](javascript:alert(3)) <b onclick=x>raw</b>"
     project.state.set_agenda_status("a2", "open", '<a href="javascript:alert(4)">x</a>')
     project.save_state()

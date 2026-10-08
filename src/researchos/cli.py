@@ -7,6 +7,7 @@ import logging
 import sys
 import uuid
 import webbrowser
+from collections import Counter
 from collections.abc import Sequence
 from contextlib import closing
 
@@ -145,7 +146,12 @@ def _status(project: Project) -> int:
     print(
         f"Progress: {state.step} steps over {len(runs)} run(s), {len(project.sources())} sources,"
     )
-    print(f"          {len(project.notes())} notes, {tokens} tokens, ${cost:.4f}")
+    claims = Counter(project.assess(c).status for c in project.claims())
+    print(
+        f"          {sum(claims.values())} claims ({claims['verified']} verified, "
+        f"{claims['single_source']} single-source, {claims['disputed']} disputed), "
+        f"{tokens} tokens, ${cost:.4f}"
+    )
     if state.agenda:
         print("Agenda:")
         for item in state.agenda:

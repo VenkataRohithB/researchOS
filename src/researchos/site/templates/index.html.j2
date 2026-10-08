@@ -55,6 +55,7 @@
     <p class="hero-meta">
       Based on {{ site.findings|length }} finding{{ "" if site.findings|length == 1 else "s" }}
       from {{ site.sources|length }} source{{ "" if site.sources|length == 1 else "s" }}, researched on {{ site.researched_on }}.
+      {% if site.findings %}{{ site.verified }} of them {{ "is" if site.verified == 1 else "are" }} confirmed by independent sources.{% endif %}
       {% if site.level %}Written for: {{ site.level }}.{% endif %}
     </p>
     {% if site.agenda %}
@@ -84,12 +85,27 @@
   <section class="section" id="findings" aria-labelledby="findings-heading">
     <h2 id="findings-heading">Findings</h2>
     {% if site.findings %}
-    <p class="section-lede">What the agent recorded while reading, with the sources each finding came from.</p>
+    <p class="section-lede">Each finding is backed by passages quoted from its sources, checked word for word against the pages the agent read. A finding is verified when two independent sources support it.</p>
     <ul class="findings">
       {% for finding in site.findings %}
       <li class="finding" id="{{ finding.anchor }}">
         <div class="finding-text">
-          <p>{{ finding.html }}{% for cite in finding.citations %}<a class="cite" href="#{{ cite.anchor }}" aria-label="Source {{ cite.number }}: {{ cite.title }}">{{ cite.number }}<span class="cite-tip" aria-hidden="true">{{ cite.title }}<span>{{ cite.domain }}</span></span></a>{% endfor %}</p>
+          <p class="finding-status status-{{ finding.status }}">{{ finding.status_label }}{% if finding.kind %}<span class="finding-kind">{{ finding.kind }}</span>{% endif %}</p>
+          <p class="finding-claim">{{ finding.html }}{% for cite in finding.citations %}<a class="cite" href="#{{ cite.anchor }}" aria-label="Source {{ cite.number }}: {{ cite.title }}">{{ cite.number }}<span class="cite-tip" aria-hidden="true">{{ cite.title }}<span>{{ cite.domain }}</span></span></a>{% endfor %}</p>
+          {% if finding.note %}<p class="finding-note">{{ finding.note }}</p>{% endif %}
+          {% if finding.evidence %}
+          <details class="evidence">
+            <summary>Why this is believed: {{ finding.evidence|length }} quoted passage{{ "" if finding.evidence|length == 1 else "s" }}</summary>
+            <ul>
+              {% for item in finding.evidence %}
+              <li class="evidence-item stance-{{ item.stance|lower }}">
+                <blockquote>{{ item.quote }}</blockquote>
+                <p>{{ item.stance }}, from <a href="#{{ item.citation.anchor }}">source {{ item.citation.number }}</a> ({{ item.citation.domain }})</p>
+              </li>
+              {% endfor %}
+            </ul>
+          </details>
+          {% endif %}
         </div>
         <ul class="finding-sources" aria-label="Sources for {{ finding.label }}">
           <li class="finding-label">{{ finding.label }}</li>
@@ -131,7 +147,8 @@
         <span class="source-number">{{ source.number }}</span>
         <div>
           <a class="source-title" href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }}</a>
-          <p class="source-meta">{{ source.domain }}, fetched {{ source.fetched }}.
+          <p class="source-meta">{{ source.tier }} from {{ source.domain }}{% if source.published %}, published {{ source.published }}{% endif %}, fetched {{ source.fetched }}.
+            {% if source.duplicate_of %}Same content as <a href="#source-{{ source.duplicate_of }}">source {{ source.duplicate_of }}</a>, so it does not count as independent.{% endif %}
             {% if source.cited_by %}Cited in finding{{ "s" if source.cited_by|length > 1 }} {% for anchor, number in source.cited_by %}<a href="#{{ anchor }}">{{ number }}</a>{{ ", " if not loop.last }}{% endfor %}.{% else %}Not cited in any finding.{% endif %}
           </p>
         </div>

@@ -23,11 +23,12 @@ def test_state_and_transcript_are_persisted(tmp_path: Path) -> None:
 
     state = reopen(project).state
     assert state.status is RunStatus.COMPLETED
-    assert state.step == 5
+    assert state.step == 7
     assert state.agenda[0].text == "Understand the basics of test topic"
+    assert state.agenda[0].status == "done"
     assert state.summary == "Mock research on 'test topic' complete."
-    assert state.runs[0].usage is not None and state.runs[0].usage.llm_calls == 5
-    assert len(Transcript(project.transcript_path)) == 5
+    assert state.runs[0].usage is not None and state.runs[0].usage.llm_calls == 7
+    assert len(Transcript(project.transcript_path)) == 7
 
 
 def test_resume_continues_where_the_previous_run_stopped(tmp_path: Path) -> None:
@@ -38,10 +39,10 @@ def test_resume_continues_where_the_previous_run_stopped(tmp_path: Path) -> None
     result = agent_for(project, MockLLM(), run_id="second").run()
 
     assert result.status is RunStatus.COMPLETED
-    assert result.usage.steps == 3  # fetch, note, finish: plan and search were not redone
+    assert result.usage.steps == 5  # fetch, claim, close, review, finish: no redone planning
     state = reopen(project).state
     assert [r.status for r in state.runs] == [RunStatus.BUDGET_EXHAUSTED, RunStatus.COMPLETED]
-    assert state.step == 5
+    assert state.step == 7
     assert len(project.sources()) == 1
 
 
@@ -99,36 +100,84 @@ def test_agenda_and_phase_tools_update_state(tmp_path: Path) -> None:
             call("update_agenda", add=["what is X", "how X works"]),
             call(
                 "update_agenda",
-                update=[{"id": "a1", "status": "done", "note": "covered"}],
+                update=[
+                    {"id": "a1", "status": "done", "note": "covered", "claim_ids": ["claim-0001"]}
+                ],
                 add=["X vs Y"],
             ),
-            call("update_agenda", update=[{"id": "a99", "status": "done"}]),
+            call(
+                "update_agenda",
+                update=[
+                    {"id": "a2", "status": "dropped", "note": "out of scope"},
+                    {"id": "a3", "status": "dropped", "note": "no sources found"},
+                ],
+            ),
             call("set_phase", phase="cross_checking", reason="verifying key claims"),
             call("finish_research", summary="done"),
+            call("finish_research", summary="done, accepting single-source claim-0001"),
         ]
     )
     agent, project = make_agent(tmp_path, llm)
 
-    agent.run()
+    assert agent.run().status is RunStatus.COMPLETED
+    review = tool_results(llm.requests[-1])[-1]["error"]
+    assert "single-source or disputed: claim-0001" in review
 
     state = reopen(project).state
-    assert [(i.id, i.status) for i in state.agenda] == [
-        ("a1", "done"),
-        ("a2", "open"),
-        ("a3", "open"),
+    assert [(i.id, i.status, i.claim_ids) for i in state.agenda] == [
+        ("a1", "done", ["claim-0001"]),
+        ("a2", "dropped", []),
+        ("a3", "dropped", []),
     ]
     assert state.phase is Phase.CROSS_CHECKING
-    errors = [r for r in tool_results(llm.requests[-1]) if "error" in r]
-    assert "unknown agenda item(s): a99" in errors[0]["error"]
-    assert "a1 [done] what is X — covered" in (llm.requests[-1][1].content or "")
+    assert "a1 [done] what is X (claims: claim-0001) — covered" in (
+        llm.requests[-1][1].content or ""
+    )
 
 
-def test_read_notes_pages_through_notes(tmp_path: Path) -> None:
+def test_agenda_items_close_only_with_quoted_claims_and_finish_needs_none_open(
+    tmp_path: Path,
+) -> None:
     llm = ScriptedLLM(
         [
-            call("save_note", text="first"),
-            call("save_note", text="second"),
-            call("read_notes", offset=1, limit=5),
+            call("update_agenda", add=["what is X", "how X works"]),
+            call("record_claim", text="my guess", kind="inference"),
+            call("update_agenda", update=[{"id": "a1", "status": "done"}]),
+            call(
+                "update_agenda",
+                update=[{"id": "a1", "status": "done", "claim_ids": ["claim-0002"]}],
+            ),
+            call(
+                "update_agenda",
+                update=[{"id": "a1", "status": "done", "claim_ids": ["claim-0099"]}],
+            ),
+            call("update_agenda", update=[{"id": "a2", "status": "dropped"}]),
+            call("update_agenda", update=[{"id": "a99", "status": "done"}]),
+            call("finish_research", summary="done"),
+            call("list_claims"),  # lets the test observe the rejected finish
+        ]
+    )
+    agent, project = make_agent(tmp_path, llm, max_steps=9)
+
+    assert agent.run().status is RunStatus.BUDGET_EXHAUSTED
+
+    errors = [r["error"] for r in tool_results(llm.requests[-1]) if "error" in r]
+    assert "list the claim_ids that cover it" in errors[0]
+    assert "claim-0002 has no supporting quote" in errors[1]
+    assert "unknown claim 'claim-0099'" in errors[2]
+    assert "give a reason in note to drop it" in errors[3]
+    assert "unknown agenda item(s): a99" in errors[4]
+    assert "agenda items still open: a1, a2" in errors[5]
+    assert all(item.status == "open" for item in reopen(project).state.agenda)
+
+
+def test_list_claims_pages_and_filters_by_status(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        [
+            call("record_claim", text="first", kind="inference"),
+            call("record_claim", text="second", kind="interpretation"),
+            call("list_claims", offset=1, limit=5),
+            call("list_claims", status="unsupported"),
             call("finish_research", summary="done"),
         ]
     )
@@ -136,9 +185,10 @@ def test_read_notes_pages_through_notes(tmp_path: Path) -> None:
 
     agent.run()
 
-    page = tool_results(llm.requests[-1])[-1]
-    assert page["total"] == 3
-    assert [n["text"] for n in page["notes"]] == ["first", "second"]
+    paged, unsupported = tool_results(llm.requests[-1])[-2:]
+    assert paged["total"] == 3
+    assert [c["text"] for c in paged["claims"]] == ["first", "second"]
+    assert [c["text"] for c in unsupported["claims"]] == ["first", "second"]
 
 
 def test_transcript_ignores_a_partially_written_last_line(tmp_path: Path) -> None:

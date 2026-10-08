@@ -7,6 +7,7 @@ non-global. Responses are size-capped and only textual content types are accepte
 
 from __future__ import annotations
 
+import io
 import ipaddress
 import socket
 from dataclasses import dataclass
@@ -15,14 +16,16 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
 import trafilatura
+from pypdf import PdfReader
 
 from researchos.web.search import MOCK_HOST
 
-MAX_BYTES = 5 * 1024 * 1024
+MAX_BYTES = 15 * 1024 * 1024
 MAX_REDIRECTS = 5
 USER_AGENT = "ResearchOS/0.1 (+https://github.com/VenkataRohithB/researchOS)"
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 _TEXT_TYPES = frozenset({"text/plain", "text/markdown"})
+_PDF_TYPE = "application/pdf"
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,8 @@ class FetchedPage:
     """Final URL after redirects."""
     title: str
     text: str
+    published: str | None = None
+    """Publication date stated by the page (ISO format where known)."""
 
 
 class FetchError(Exception):
@@ -98,7 +103,7 @@ class HttpFetcher:
                     encoding = response.encoding or "utf-8"
             except httpx.TransportError as exc:
                 raise FetchError(f"request failed: {exc.__class__.__name__}") from exc
-            return _to_page(current, content_type, body.decode(encoding, errors="replace"))
+            return _to_page(current, content_type, body, encoding)
         raise FetchError(f"more than {MAX_REDIRECTS} redirects")
 
 
@@ -139,14 +144,43 @@ def _read_capped(response: httpx.Response) -> bytes:
     return b"".join(chunks)
 
 
-def _to_page(url: str, content_type: str, body: str) -> FetchedPage:
+def _to_page(url: str, content_type: str, body: bytes, encoding: str) -> FetchedPage:
+    if content_type == _PDF_TYPE or (not content_type and body.startswith(b"%PDF-")):
+        return _pdf_page(url, body)
+    text = body.decode(encoding, errors="replace")
     if content_type in _TEXT_TYPES:
-        return FetchedPage(url=url, title=urlsplit(url).path.rsplit("/", 1)[-1] or url, text=body)
+        return FetchedPage(url=url, title=_name_from_url(url), text=text)
     if content_type not in _HTML_TYPES:
         raise FetchError(f"unsupported content type: {content_type or 'unknown'}")
-    text = trafilatura.extract(body, url=url, include_comments=False, include_tables=True)
-    if not text:
+    extracted = trafilatura.extract(text, url=url, include_comments=False, include_tables=True)
+    if not extracted:
         raise FetchError("no readable text could be extracted from the page")
-    metadata = trafilatura.extract_metadata(body, default_url=url)
+    metadata = trafilatura.extract_metadata(text, default_url=url)
     title = (metadata.title if metadata is not None else None) or url
-    return FetchedPage(url=url, title=str(title), text=str(text))
+    published = metadata.date if metadata is not None else None
+    return FetchedPage(
+        url=url,
+        title=str(title),
+        text=str(extracted),
+        published=str(published) if published else None,
+    )
+
+
+def _pdf_page(url: str, body: bytes) -> FetchedPage:
+    try:
+        reader = PdfReader(io.BytesIO(body))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        info = reader.metadata
+    except Exception as exc:  # pypdf raises many exception types on malformed input
+        raise FetchError(f"could not read the PDF: {exc.__class__.__name__}") from exc
+    text = "\n\n".join(p.strip() for p in pages if p.strip())
+    if not text:
+        raise FetchError("the PDF has no extractable text (it may be scanned images)")
+    title = (info.title if info is not None else None) or _name_from_url(url)
+    created = info.creation_date if info is not None else None
+    published = created.date().isoformat() if created is not None else None
+    return FetchedPage(url=url, title=str(title), text=text, published=published)
+
+
+def _name_from_url(url: str) -> str:
+    return unquote(urlsplit(url).path.rsplit("/", 1)[-1]) or url
