@@ -13,7 +13,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     llm_provider: Literal["openai_compatible", "mock"] = "mock"
-    llm_model: str = "mock"
+    llm_model: str = Field(
+        default="mock",
+        description="Model name, or a comma-separated list tried in order when one is unavailable",
+    )
     llm_api_key: SecretStr = SecretStr("")
     llm_base_url: str = "https://api.openai.com/v1"
     llm_price_in: float = Field(default=0.0, ge=0, description="USD per 1M input tokens")
@@ -31,6 +34,10 @@ class Settings(BaseSettings):
     context_turns: int = Field(default=6, ge=1, description="Recent turns shown to the model")
 
     workspace_dir: Path = Path("workspace")
+
+    @property
+    def llm_models(self) -> list[str]:
+        return [m.strip() for m in self.llm_model.split(",") if m.strip()] or ["mock"]
 
     @model_validator(mode="after")
     def _require_credentials(self) -> Self:

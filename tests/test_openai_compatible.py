@@ -170,13 +170,66 @@ def test_honours_google_retry_info_delay_in_error_body() -> None:
     assert sleeps == [59.0]
 
 
-def test_server_requested_delay_is_capped() -> None:
-    responses = [
-        httpx.Response(429, headers={"retry-after": "3600"}),
-        httpx.Response(200, json=OK_BODY),
-    ]
+def test_quota_that_resets_in_hours_fails_fast_instead_of_waiting() -> None:
     sleeps: list[float] = []
+    with pytest.raises(LLMUnavailableError, match="quota exhausted"):
+        client(lambda _: httpx.Response(429, headers={"retry-after": "52067"}), sleeps).chat(
+            [Message(role="user", content="x")], []
+        )
+    assert sleeps == []
 
-    client(lambda _: responses.pop(0), sleeps).chat([Message(role="user", content="x")], [])
 
-    assert sleeps == [120.0]
+def fallback_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> OpenAICompatibleClient:
+    return OpenAICompatibleClient(
+        base_url="https://llm.example/v1",
+        api_key=SecretStr("k"),
+        model="primary",
+        fallback_models=["backup", "last-resort"],
+        timeout_seconds=5,
+        max_retries=1,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+    )
+
+
+def test_falls_back_to_the_next_model_and_stays_there() -> None:
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        asked.append(model)
+        if model == "primary":
+            return httpx.Response(429, headers={"retry-after": "40000"})
+        if model == "backup":
+            return httpx.Response(503)
+        return httpx.Response(200, json=OK_BODY)
+
+    llm = fallback_client(handler)
+    first = llm.chat([Message(role="user", content="x")], [])
+    llm.chat([Message(role="user", content="y")], [])
+
+    # primary once (quota), backup twice (503 then a retry), then last-resort for both calls.
+    assert asked == ["primary", "backup", "backup", "last-resort", "last-resort"]
+    assert llm.model == "last-resort"
+    assert first.model == "served-model"
+
+
+def test_gives_up_when_every_model_is_unavailable() -> None:
+    llm = fallback_client(lambda _: httpx.Response(503))
+
+    with pytest.raises(LLMUnavailableError):
+        llm.chat([Message(role="user", content="x")], [])
+
+
+def test_authorization_failures_do_not_fall_back() -> None:
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(json.loads(request.content)["model"])
+        return httpx.Response(403, json={"error": {"message": "kill switch"}})
+
+    with pytest.raises(LLMAuthorizationError):
+        fallback_client(handler).chat([Message(role="user", content="x")], [])
+    assert asked == ["primary"]

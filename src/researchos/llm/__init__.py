@@ -22,10 +22,12 @@ from researchos.llm.types import (
 def create_llm_client(settings: Settings) -> LLMClient:
     if settings.llm_provider == "mock":
         return MockLLM()
+    primary, *fallbacks = settings.llm_models
     return OpenAICompatibleClient(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
-        model=settings.llm_model,
+        model=primary,
+        fallback_models=fallbacks,
         timeout_seconds=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
     )

@@ -34,6 +34,10 @@ _STANDARD_CALL_KEYS = frozenset({"id", "type", "function"})
 
 
 class OpenAICompatibleClient:
+    """`model` may be followed by `fallback_models`, tried in order. When a model is
+    unavailable (its quota is exhausted, or it keeps failing after retries) the client switches
+    to the next one for the rest of its life and logs the switch."""
+
     def __init__(
         self,
         *,
@@ -42,28 +46,45 @@ class OpenAICompatibleClient:
         model: str,
         timeout_seconds: float,
         max_retries: int,
+        fallback_models: Sequence[str] = (),
         http_client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self.model = model
+        self._models = [model, *fallback_models]
+        self._current = 0
         self._url = base_url.rstrip("/") + "/chat/completions"
         self._api_key = api_key
         self._max_retries = max_retries
         self._http = http_client or httpx.Client(timeout=timeout_seconds)
         self._sleep = sleep
 
+    @property
+    def model(self) -> str:
+        return self._models[self._current]
+
     def close(self) -> None:
         self._http.close()
 
     def chat(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> LLMResponse:
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [_encode_message(m) for m in messages],
-        }
+        payload: dict[str, Any] = {"messages": [_encode_message(m) for m in messages]}
         if tools:
             payload["tools"] = [_encode_tool(t) for t in tools]
             payload["tool_choice"] = "auto"
-        return _decode_response(self._post(payload), self.model)
+        while True:
+            try:
+                body = self._post({"model": self.model, **payload})
+            except LLMUnavailableError as exc:
+                if self._current + 1 >= len(self._models):
+                    raise
+                logger.warning(
+                    "model %s unavailable (%s); switching to %s",
+                    self.model,
+                    exc,
+                    self._models[self._current + 1],
+                )
+                self._current += 1
+                continue
+            return _decode_response(body, self.model)
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._api_key.get_secret_value()}"}
@@ -90,14 +111,15 @@ class OpenAICompatibleClient:
                     raise LLMResponseError(f"HTTP {status}: {detail}")
                 failure = f"HTTP {status}: {detail}"
                 delay = _retry_after_seconds(response)
+                if delay is not None and delay > _MAX_SERVER_DELAY_SECONDS:
+                    # A quota that resets in hours, not a burst limit: waiting cannot help.
+                    raise LLMUnavailableError(
+                        f"quota exhausted; the provider asks to wait {delay:.0f}s ({failure})"
+                    )
 
             if attempt == self._max_retries:
                 raise LLMUnavailableError(f"giving up after {attempt + 1} attempts ({failure})")
-            delay = (
-                min(delay, _MAX_SERVER_DELAY_SECONDS)
-                if delay is not None
-                else min(2.0**attempt, _MAX_BACKOFF_SECONDS)
-            )
+            delay = delay if delay is not None else min(2.0**attempt, _MAX_BACKOFF_SECONDS)
             logger.warning("LLM request failed (%s); retrying in %.1fs", failure, delay)
             self._sleep(delay)
         raise AssertionError("unreachable")

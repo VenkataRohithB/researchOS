@@ -1,10 +1,16 @@
-"""Static website generation for a research project.
+"""The project website: an interactive, self-contained learning site.
 
-`build_site` renders everything the project knows into a single self-contained
-`website/index.html`: styles, scripts and search data are inlined so the file works offline
-and can be opened directly or shared. All model- and web-derived text is escaped or rendered
-through Markdown with raw HTML disabled, and a Content-Security-Policy pins the inline style
-and script by hash.
+`build_site` writes `website/index.html`, one file that works offline. It embeds:
+
+- the concept graph, with each concept's explanations at five depths,
+- every claim with its status and quoted evidence,
+- the sources, the research plan and the run log,
+- a precomputed concept-map layout.
+
+All text is rendered here: Markdown with raw HTML disabled, citations turned into evidence
+chips and [[links]] into navigation. The page script only places this pre-rendered,
+escaped markup and wires up navigation, so model- and web-derived text can never inject
+markup or script. A Content-Security-Policy pins the inline style and script by hash.
 """
 
 from __future__ import annotations
@@ -14,7 +20,6 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
@@ -26,17 +31,28 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 from markupsafe import Markup, escape
 
-from researchos.evidence import Claim
+from researchos.knowledge import LEVELS
 from researchos.project import Project
+from researchos.site.layout import ROOT, learning_order, radial_map
 from researchos.state import RunStatus
 
-# Agenda notes refer to claims by id; older projects refer to the notes claims replaced.
+_CITATION = re.compile(r"\[\s*(claim-\d{4}(?:\s*[,;]\s*claim-\d{4})*)\s*\]")
+_CLAIM_ID = re.compile(r"claim-\d{4}")
+_LINK = re.compile(r"\[\[([^\[\]]+)\]\]")
 _FINDING_REF = re.compile(r"\b(?:claim|note)-(\d{4})\b")
 # Valid in JSON strings but line terminators in JavaScript source.
 _LINE_SEPARATOR = chr(0x2028)
 _PARAGRAPH_SEPARATOR = chr(0x2029)
 
-_TIER_LABELS = {
+LEVEL_LABELS = {
+    "summary": "Summary",
+    "beginner": "Beginner",
+    "intermediate": "Intermediate",
+    "deep": "Deep dive",
+    "expert": "Expert",
+}
+
+TIER_LABELS = {
     "paper": "Research paper",
     "academic": "Academic",
     "standard": "Standard",
@@ -48,9 +64,14 @@ _TIER_LABELS = {
     "other": "Web page",
 }
 
-_STANCE_LABELS = {"supports": "Supports", "contradicts": "Contradicts", "qualifies": "Qualifies"}
+STATUS_LABELS = {
+    "verified": "Verified",
+    "single_source": "Single source",
+    "disputed": "Disputed",
+    "unsupported": "Unsupported",
+}
 
-_RUN_STATUS_LABELS = {
+RUN_STATUS_LABELS = {
     RunStatus.RUNNING: "Running",
     RunStatus.COMPLETED: "Completed",
     RunStatus.INTERRUPTED: "Interrupted",
@@ -61,104 +82,9 @@ _RUN_STATUS_LABELS = {
 }
 
 
-@dataclass(frozen=True)
-class TocEntry:
-    anchor: str
-    title: str
-    level: int
-
-
-@dataclass(frozen=True)
-class SummarySection:
-    anchor: str
-    title: str
-    text: str
-
-
-@dataclass(frozen=True)
-class SiteSource:
-    number: int
-    anchor: str
-    title: str
-    url: str
-    domain: str
-    fetched: str
-    published: str | None
-    tier: str
-    duplicate_of: int | None
-    """Number of the source this one duplicates."""
-    cited_by: list[tuple[str, int]]
-    """(finding anchor, finding number) for each finding that cites this source."""
-
-
-@dataclass(frozen=True)
-class Citation:
-    number: int
-    anchor: str
-    title: str
-    domain: str
-
-
-@dataclass(frozen=True)
-class SiteEvidence:
-    stance: str
-    quote: str
-    citation: Citation
-
-
-@dataclass(frozen=True)
-class SiteFinding:
-    anchor: str
-    label: str
-    html: Markup
-    kind: str | None
-    """"Interpretation" or "Inference"; None for facts."""
-    status: str
-    status_label: str
-    note: str | None
-    citations: list[Citation]
-    evidence: list[SiteEvidence]
-
-
-@dataclass(frozen=True)
-class SiteAgendaItem:
-    status: str
-    html: Markup
-
-
-@dataclass(frozen=True)
-class SiteRun:
-    started: str
-    status: str
-    steps: int
-    tokens: int
-    cost: str
-    duration: str
-
-
-@dataclass
-class SiteData:
-    topic: str
-    goal: str | None
-    level: str | None
-    project_id: str
-    researched_on: str
-    generated_at: str
-    stopped_reason: str | None
-    summary_html: Markup | None
-    summary_toc: list[TocEntry]
-    findings: list[SiteFinding]
-    verified: int
-    sources: list[SiteSource]
-    agenda: list[SiteAgendaItem]
-    runs: list[SiteRun]
-    search_index: list[dict[str, str]] = field(default_factory=list)
-
-
 def build_site(project: Project) -> Path:
     """Render the project's website and return the path of `index.html`."""
-    data = collect(project)
-    html = render(data)
+    html = render(collect(project), project.metadata.request.topic)
     out_dir = project.root / "website"
     out_dir.mkdir(exist_ok=True)
     path = out_dir / "index.html"
@@ -168,134 +94,150 @@ def build_site(project: Project) -> Path:
     return path
 
 
-def collect(project: Project) -> SiteData:
-    """Gather the project's research into template-ready, already-escaped values."""
+def collect(project: Project) -> dict[str, Any]:
+    """Everything the page shows, as JSON-ready data with HTML fields pre-rendered."""
     request = project.metadata.request
     state = project.state
+    concepts = project.concepts()
     claims = project.claims()
     sources = project.sources()
+    md = _markdown()
 
-    # Number sources in order of first citation, then the uncited ones.
+    claim_numbers = {c.id: n for n, c in enumerate(claims, start=1)}
+    concept_ids = {c.id for c in concepts}
+    titles = {c.title.lower(): c.id for c in concepts}
+    for concept in concepts:
+        for alias in concept.aliases:
+            titles.setdefault(alias.lower(), concept.id)
+
+    def rich(markdown_text: str, *, inline: bool = False) -> str:
+        html = md.renderInline(markdown_text) if inline else md.render(markdown_text)
+        html = _CITATION.sub(lambda m: _chips(m.group(1), claim_numbers), html)
+        return _LINK.sub(lambda m: _concept_link(m.group(1), titles), html)
+
+    # Sources numbered by first use as evidence.
     order: list[str] = []
     for claim in claims:
         order += [e.source_id for e in claim.evidence if e.source_id not in order]
     order += [s.id for s in sources if s.id not in order]
-    by_id = {s.id: s for s in sources}
-    numbers = {sid: n for n, sid in enumerate(order, start=1)}
-
-    finding_numbers = {claim.id: n for n, claim in enumerate(claims, start=1)}
-    cited_by: dict[str, list[tuple[str, int]]] = {sid: [] for sid in order}
+    source_numbers = {sid: n for n, sid in enumerate(order, start=1)}
+    by_source: dict[str, list[str]] = {sid: [] for sid in order}
     for claim in claims:
         for sid in dict.fromkeys(e.source_id for e in claim.evidence):
-            cited_by[sid].append((claim.id, finding_numbers[claim.id]))
+            by_source[sid].append(claim.id)
 
-    def citation(source_id: str) -> Citation:
-        return Citation(
-            number=numbers[source_id],
-            anchor=f"source-{numbers[source_id]}",
-            title=by_id[source_id].title,
-            domain=_domain(by_id[source_id].url),
-        )
+    claim_concepts: dict[str, list[str]] = {}
+    for concept in concepts:
+        for claim_id in concept.claim_ids:
+            claim_concepts.setdefault(claim_id, []).append(concept.id)
 
-    site_sources = [
-        SiteSource(
-            number=numbers[sid],
-            anchor=f"source-{numbers[sid]}",
-            title=by_id[sid].title,
-            url=by_id[sid].url,
-            domain=_domain(by_id[sid].url),
-            fetched=_date(by_id[sid].fetched_at, month="%b"),
-            published=by_id[sid].published,
-            tier=_TIER_LABELS[by_id[sid].tier],
-            duplicate_of=numbers.get(by_id[sid].duplicate_of or ""),
-            cited_by=cited_by[sid],
-        )
-        for sid in order
-    ]
+    children = {c.id: [k.id for k in concepts if k.parent == c.id] for c in concepts}
+    concept_map = radial_map(request.topic, concepts)
 
-    md = _markdown()
-    findings: list[SiteFinding] = []
-    for claim in claims:
-        assessment = project.assess(claim)
-        findings.append(
-            SiteFinding(
-                anchor=claim.id,
-                label=f"Finding {finding_numbers[claim.id]}",
-                html=_trusted(md.renderInline(claim.text)),
-                kind=None if claim.kind == "fact" else claim.kind.capitalize(),
-                status=assessment.status,
-                status_label=_status_label(
-                    assessment.status, assessment.supporting_sources, claim.kind
-                ),
-                note=claim.note,
-                citations=[
-                    citation(sid) for sid in dict.fromkeys(e.source_id for e in claim.evidence)
-                ],
-                evidence=[
-                    SiteEvidence(
-                        stance=_STANCE_LABELS[e.stance],
-                        quote=e.quote,
-                        citation=citation(e.source_id),
-                    )
-                    for e in claim.evidence
-                ],
-            )
-        )
-
-    summary_html, toc, sections = (
-        (None, [], []) if not state.summary else _render_summary(md, state.summary)
-    )
-
-    status = state.status
     last_run = state.runs[-1] if state.runs else None
-    stopped_reason = None
-    if status is not None and status is not RunStatus.COMPLETED:
-        stopped_reason = f"{_RUN_STATUS_LABELS[status]}" + (
+    stopped = None
+    if state.status is not None and state.status is not RunStatus.COMPLETED:
+        stopped = RUN_STATUS_LABELS[state.status] + (
             f" ({last_run.reason})" if last_run and last_run.reason else ""
         )
-
     researched = (last_run.ended_at or last_run.started_at) if last_run else None
     generated = datetime.now(UTC)
-    data = SiteData(
-        topic=request.topic,
-        goal=request.goal,
-        level=request.knowledge_level,
-        project_id=project.metadata.id,
-        researched_on=_date(researched or generated),
-        generated_at=f"{_date(generated)}, {generated:%H:%M} UTC",
-        stopped_reason=stopped_reason,
-        summary_html=summary_html,
-        summary_toc=toc,
-        findings=findings,
-        verified=sum(1 for f in findings if f.status == "verified"),
-        sources=site_sources,
-        agenda=[
-            SiteAgendaItem(
-                status=item.status,
-                html=_agenda_html(item.text, item.note, item.claim_ids, finding_numbers),
-            )
+    assessments = {c.id: project.assess(c) for c in claims}
+    status_counts = dict.fromkeys(STATUS_LABELS, 0)
+    for assessment in assessments.values():
+        status_counts[assessment.status] += 1
+
+    return {
+        "topic": request.topic,
+        "goal": request.goal,
+        "level": request.knowledge_level,
+        "projectId": project.metadata.id,
+        "researchedOn": _date(researched or generated),
+        "generatedAt": f"{_date(generated)}, {generated:%H:%M} UTC",
+        "stopped": stopped,
+        "summaryHtml": rich(state.summary) if state.summary else None,
+        "levels": [{"id": level, "label": LEVEL_LABELS[level]} for level in LEVELS],
+        "path": learning_order(concepts),
+        "concepts": {
+            c.id: {
+                "id": c.id,
+                "title": c.title,
+                "summaryHtml": rich(c.summary, inline=True) if c.summary else "",
+                "parent": c.parent if c.parent in concept_ids else None,
+                "children": children[c.id],
+                "prerequisites": [p for p in c.prerequisites if p in concept_ids],
+                "related": [r for r in c.related if r in concept_ids],
+                "claims": c.claim_ids,
+                "levels": {level: rich(text) for level, text in c.explanations.items()},
+                "researched": bool(c.claim_ids),
+            }
+            for c in concepts
+        },
+        "claims": {
+            c.id: {
+                "number": claim_numbers[c.id],
+                "textHtml": rich(c.text, inline=True),
+                "kind": c.kind,
+                "status": assessments[c.id].status,
+                "statusLabel": _status_label(
+                    assessments[c.id].status, assessments[c.id].supporting_sources
+                ),
+                "note": c.note,
+                "concepts": claim_concepts.get(c.id, []),
+                "evidence": [
+                    {"quote": e.quote, "stance": e.stance, "source": source_numbers[e.source_id]}
+                    for e in c.evidence
+                ],
+            }
+            for c in claims
+        },
+        "statusCounts": status_counts,
+        "sources": [
+            {
+                "number": source_numbers[s.id],
+                "title": s.title,
+                "url": s.url,
+                "domain": (urlsplit(s.url).hostname or s.url).removeprefix("www."),
+                "tier": TIER_LABELS[s.tier],
+                "published": s.published,
+                "fetched": _date(s.fetched_at, month="%b"),
+                "duplicateOf": source_numbers.get(s.duplicate_of or ""),
+                "claims": by_source[s.id],
+            }
+            for s in sorted(sources, key=lambda s: source_numbers[s.id])
+        ],
+        "agenda": [
+            {
+                "status": item.status,
+                "text": item.text,
+                "noteHtml": _agenda_note(item.note, claim_numbers),
+                "claims": [cid for cid in item.claim_ids if cid in claim_numbers],
+            }
             for item in state.agenda
         ],
-        runs=[
-            SiteRun(
-                started=f"{_date(run.started_at, month='%b')}, {run.started_at:%H:%M}",
-                status=_RUN_STATUS_LABELS[run.status],
-                steps=run.usage.steps if run.usage else 0,
-                tokens=(run.usage.input_tokens + run.usage.output_tokens) if run.usage else 0,
-                cost=f"${run.usage.cost_usd:.4f}" if run.usage else "$0.0000",
-                duration=_duration(run.usage.elapsed_seconds) if run.usage else "",
-            )
+        "runs": [
+            {
+                "started": f"{_date(run.started_at, month='%b')}, {run.started_at:%H:%M}",
+                "status": RUN_STATUS_LABELS[run.status],
+                "steps": run.usage.steps if run.usage else 0,
+                "tokens": (run.usage.input_tokens + run.usage.output_tokens) if run.usage else 0,
+                "cost": f"${run.usage.cost_usd:.4f}" if run.usage else "$0.0000",
+            }
             for run in state.runs
         ],
-    )
-    data.search_index = _search_index(sections, findings, claims, site_sources)
-    return data
+        "map": {
+            "root": ROOT,
+            "viewBox": concept_map.view_box,
+            "nodes": [vars(n) for n in concept_map.nodes],
+            "edges": [vars(e) for e in concept_map.edges],
+        },
+    }
 
 
-def render(data: SiteData) -> str:
+def render(data: dict[str, Any], title: str) -> str:
     static = resources.files("researchos.site").joinpath("static")
-    css = static.joinpath("site.css").read_text("utf-8")
-    js = static.joinpath("site.js").read_text("utf-8")
+    css = static.joinpath("app.css").read_text("utf-8")
+    js = static.joinpath("app.js").read_text("utf-8")
     csp = "; ".join(
         [
             "default-src 'none'",
@@ -313,18 +255,17 @@ def render(data: SiteData) -> str:
         trim_blocks=True,
         lstrip_blocks=True,
     )
-    template = env.get_template("index.html.j2")
-    return template.render(
-        site=data,
+    return env.get_template("index.html.j2").render(
+        title=title,
+        data=data,
         css=_trusted(css),
         js=_trusted(js),
         csp=csp,
-        search_json=_trusted(_script_safe_json(data.search_index)),
-        agenda_done=sum(1 for item in data.agenda if item.status == "done"),
+        data_json=_trusted(_script_safe_json(data)),
     )
 
 
-# Markdown -------------------------------------------------------------------------------
+# Rendering helpers ------------------------------------------------------------------------
 
 
 def _markdown() -> MarkdownIt:
@@ -342,143 +283,64 @@ def _markdown() -> MarkdownIt:
     return md
 
 
-def _render_summary(
-    md: MarkdownIt, text: str
-) -> tuple[Markup, list[TocEntry], list[SummarySection]]:
-    """Render the summary with stable heading anchors, its top heading level shifted to h3
-    (the page supplies the h2). Also returns its table of contents and its text split into
-    sections for search."""
-    tokens = md.parse(text)
-    top = min((int(t.tag[1]) for t in tokens if t.type == "heading_open"), default=3)
-    toc: list[TocEntry] = []
-    sections = [SummarySection(anchor="summary", title="Summary", text="")]
-    used: set[str] = set()
-    for i, token in enumerate(tokens):
-        if token.type in ("heading_open", "heading_close"):
-            level = min(int(token.tag[1]) - top + 3, 6)
-            token.tag = f"h{level}"
-            if token.type == "heading_open":
-                title = _plain(tokens[i + 1].content)
-                anchor = _unique_slug(title, used)
-                token.attrSet("id", anchor)
-                if level <= 4:
-                    toc.append(TocEntry(anchor=anchor, title=title, level=level))
-                sections.append(SummarySection(anchor=anchor, title=title, text=""))
-        elif token.type == "inline" and tokens[i - 1].type != "heading_open":
-            last = sections[-1]
-            sections[-1] = SummarySection(
-                anchor=last.anchor, title=last.title, text=f"{last.text} {_plain(token.content)}"
-            )
-    html = _trusted(md.renderer.render(tokens, md.options, {}))
-    return html, toc, [s for s in sections if s.text.strip()]
-
-
-def _agenda_html(
-    text: str, note: str | None, claim_ids: list[str], finding_numbers: dict[str, int]
-) -> Markup:
-    """Escape an agenda item and list the findings that cover it. In its note, references
-    like "claim-0003" become links labelled with the finding's number as shown on the page."""
-    covered = [
-        Markup('<a href="#{}">Finding {}</a>').format(cid, finding_numbers[cid])
-        for cid in claim_ids
-        if cid in finding_numbers
+def _chips(group: str, claim_numbers: dict[str, int]) -> str:
+    """Citation chips for claim ids found in already-escaped HTML."""
+    chips = [
+        f'<button type="button" class="cite" data-claim="{cid}" '
+        f'aria-label="Evidence for claim {claim_numbers[cid]}">{claim_numbers[cid]}</button>'
+        for cid in dict.fromkeys(_CLAIM_ID.findall(group))
+        if cid in claim_numbers
     ]
-    if covered:
-        coverage = Markup('<span class="agenda-note">Covered by {}.</span>').format(
-            Markup(", ").join(covered)
-        )
-        text_html = Markup("{}{}").format(text, coverage)
-    else:
-        text_html = escape(text)
+    return f'<span class="cites">{"".join(chips)}</span>' if chips else ""
+
+
+def _concept_link(escaped_title: str, titles: dict[str, str]) -> str:
+    """A link for a [[Title]] found in already-escaped HTML; plain text if unknown."""
+    key = escaped_title.replace("&amp;", "&").replace("&quot;", '"').replace("&#x27;", "'")
+    concept_id = titles.get(key.strip().lower())
+    if concept_id is None:
+        return escaped_title
+    return f'<a class="concept-link" href="#/concept/{concept_id}">{escaped_title}</a>'
+
+
+def _agenda_note(note: str | None, claim_numbers: dict[str, int]) -> str:
     if not note:
-        return text_html
+        return ""
     pieces: list[Markup] = []
     last = 0
     for match in _FINDING_REF.finditer(note):
         pieces.append(escape(note[last : match.start()]))
         claim_id = f"claim-{match.group(1)}"
-        if claim_id in finding_numbers:
-            label = f"Finding {finding_numbers[claim_id]}"
-            pieces.append(Markup('<a href="#{}">{}</a>').format(claim_id, label))
+        if claim_id in claim_numbers:
+            pieces.append(
+                Markup('<button type="button" class="cite" data-claim="{}">{}</button>').format(
+                    claim_id, claim_numbers[claim_id]
+                )
+            )
         else:
             pieces.append(escape(match.group(0)))
         last = match.end()
     pieces.append(escape(note[last:]))
-    return Markup('{}<span class="agenda-note">{}</span>').format(
-        text_html, Markup("").join(pieces)
-    )
+    return str(Markup("").join(pieces))
 
 
-def _status_label(status: str, supporting: int, kind: str) -> str:
+def _status_label(status: str, supporting: int) -> str:
     if status == "verified":
         return f"Verified by {supporting} independent sources"
     if status == "single_source":
-        return "Single source"
+        return "From a single source"
     if status == "disputed":
         return "Sources disagree"
-    return "Not backed by a source" if kind == "fact" else "No quoted support"
-
-
-# Helpers --------------------------------------------------------------------------------
-
-
-def _search_index(
-    sections: list[SummarySection],
-    findings: list[SiteFinding],
-    claims: list[Claim],
-    sources: list[SiteSource],
-) -> list[dict[str, str]]:
-    index = [
-        {"kind": "Summary", "title": sec.title, "text": sec.text.strip(), "href": f"#{sec.anchor}"}
-        for sec in sections
-    ]
-    index += [
-        {"kind": "Finding", "title": finding.label, "text": claim.text, "href": f"#{claim.id}"}
-        for finding, claim in zip(findings, claims, strict=True)
-    ]
-    index += [
-        {
-            "kind": "Source",
-            "title": source.title,
-            "text": f"{source.domain} {source.url}",
-            "href": f"#{source.anchor}",
-        }
-        for source in sources
-    ]
-    return index
-
-
-def _unique_slug(title: str, used: set[str]) -> str:
-    base = re.sub(r"[^a-z0-9]+", "-", _plain(title).lower()).strip("-")[:60] or "section"
-    slug, n = base, 2
-    while slug in used:
-        slug, n = f"{base}-{n}", n + 1
-    used.add(slug)
-    return slug
-
-
-def _plain(markdown_text: str) -> str:
-    text = re.sub(r"[*_`#>\[\]]|\(https?://[^)]*\)", "", markdown_text)
-    return " ".join(text.split())
+    return "Not backed by a quoted source"
 
 
 def _date(moment: datetime, month: str = "%B") -> str:
     return f"{moment.day} {moment.strftime(month)} {moment.year}"
 
 
-def _domain(url: str) -> str:
-    host = urlsplit(url).hostname or url
-    return host.removeprefix("www.")
-
-
-def _duration(seconds: float) -> str:
-    minutes, secs = divmod(round(seconds), 60)
-    return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
-
-
 def _trusted(html: str) -> Markup:
-    """Mark HTML as safe to embed. Only for markup produced by this module: Markdown rendered
-    with raw HTML disabled, the bundled static assets, and script-safe JSON."""
+    """Mark markup as safe to embed. Only for content produced by this module: the bundled
+    static assets and script-safe JSON."""
     return Markup(html)  # noqa: S704
 
 

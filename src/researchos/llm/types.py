@@ -50,7 +50,10 @@ class LLMResponse:
 
 
 class LLMClient(Protocol):
-    model: str
+    @property
+    def model(self) -> str:
+        """The model currently in use (it can change if the client falls back to another)."""
+        ...
 
     def chat(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> LLMResponse: ...
 
