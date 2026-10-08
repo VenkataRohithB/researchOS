@@ -48,7 +48,7 @@ LEVEL_LABELS = {
     "summary": "Summary",
     "beginner": "Beginner",
     "intermediate": "Intermediate",
-    "deep": "Deep dive",
+    "deep": "Deep",
     "expert": "Expert",
 }
 

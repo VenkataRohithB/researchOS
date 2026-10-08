@@ -14,7 +14,9 @@ from researchos.knowledge import Concept
 
 RING = 190.0
 """Distance between rings, in SVG units."""
-MARGIN = 120.0
+MARGIN_X = 230.0
+"""Room for labels, which extend sideways from their nodes."""
+MARGIN_Y = 70.0
 
 
 @dataclass(frozen=True)
@@ -75,7 +77,7 @@ def radial_map(topic: str, concepts: list[Concept]) -> ConceptMap:
                     title=child.title,
                     x=round(radius * math.cos(middle), 1),
                     y=round(radius * math.sin(middle), 1),
-                    r=round(7 + 2.2 * math.sqrt(len(child.claim_ids)), 1),
+                    r=round(9 + 3 * math.sqrt(len(child.claim_ids)), 1),
                     depth=depth,
                     researched=bool(child.claim_ids),
                 )
@@ -96,8 +98,11 @@ def radial_map(topic: str, concepts: list[Concept]) -> ConceptMap:
         if p in ids and p != c.parent
     ]
 
-    extent = max((max(abs(n.x), abs(n.y)) for n in nodes), default=0.0) + MARGIN
-    return ConceptMap(nodes=nodes, edges=edges, view_box=(-extent, -extent, 2 * extent, 2 * extent))
+    left = min(n.x for n in nodes) - MARGIN_X
+    top = min(n.y for n in nodes) - MARGIN_Y
+    width = max(n.x for n in nodes) + MARGIN_X - left
+    height = max(n.y for n in nodes) + MARGIN_Y - top
+    return ConceptMap(nodes=nodes, edges=edges, view_box=(left, top, width, height))
 
 
 def learning_order(concepts: list[Concept]) -> list[str]:

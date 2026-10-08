@@ -38,6 +38,12 @@
     return node;
   }
 
+  // replaceChildren() would turn a null into the text "null"; skip empty pieces instead.
+  function fill(parent) {
+    var nodes = Array.prototype.slice.call(arguments, 1).filter(function (n) { return n !== null && n !== undefined && n !== false; });
+    parent.replaceChildren.apply(parent, nodes);
+  }
+
   function plain(html) {
     var holder = document.createElement("div");
     holder.innerHTML = html || ""; // builder-rendered markup
@@ -123,7 +129,7 @@
         ])
       ]);
     });
-    drawer.replaceChildren(
+    fill(drawer,
       el("div", { class: "evidence-head" }, [
         el("span", { class: "evidence-status s-" + claim.status, text: claim.statusLabel }),
         close
@@ -189,7 +195,7 @@
       claimCount ? claimMeter() : null,
       el("p", { class: "meter-legend" }, ["Researched on " + data.researchedOn + ". ", el("a", { href: "#/sources", text: "See sources" })])
     ]);
-    view.replaceChildren(
+    fill(view,
       el("section", { class: "hero" }, [
         el("h1", { text: data.topic }),
         data.goal ? el("p", { class: "hero-goal", text: data.goal }) : null,
@@ -264,7 +270,7 @@
       el("section", {}, [el("h2", { text: "Evidence about " + c.title }), claims.length ? el("ul", { class: "claim-list" }, claims) : el("p", { class: "empty", text: "No claims recorded yet." })])
     ]);
 
-    view.replaceChildren(
+    fill(view,
       crumbs(c),
       el("div", { class: "concept" }, [
         el("article", {}, [
@@ -321,9 +327,12 @@
       var isRoot = n.id === m.root;
       var group = svg("g", { class: "node" + (isRoot ? " root" : "") + (n.researched ? "" : " stub"), transform: "translate(" + n.x + " " + n.y + ")", tabindex: "0", role: "link", "aria-label": n.title, "data-id": n.id });
       group.appendChild(svg("circle", { r: n.r }));
-      var label = svg("text", { "text-anchor": isRoot ? "middle" : (n.x >= 0 ? "start" : "end"), x: isRoot ? 0 : (n.x >= 0 ? n.r + 6 : -n.r - 6), y: isRoot ? 5 : 4 });
-      label.textContent = n.title.length > 34 && !isRoot ? n.title.slice(0, 32) + "…" : n.title;
-      group.appendChild(label);
+      // The topic is the page heading; its node is labelled on hover so it never crowds the ring.
+      if (!isRoot) {
+        var label = svg("text", { "text-anchor": n.x >= 0 ? "start" : "end", x: n.x >= 0 ? n.r + 8 : -n.r - 8, y: 5 });
+        label.textContent = n.title.length > 34 ? n.title.slice(0, 32) + "…" : n.title;
+        group.appendChild(label);
+      }
       function go() { location.hash = isRoot ? "#/" : link(n.id); }
       group.addEventListener("click", function (ev) { if (!moved) { go(); } ev.stopPropagation(); });
       group.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } });
@@ -340,9 +349,9 @@
       (neighbours[id] || []).forEach(function (other) { near[other] = true; });
       nodeLayer.querySelectorAll(".node").forEach(function (g) { g.classList.toggle("near", on && !!near[g.getAttribute("data-id")]); });
       edgeLayer.querySelectorAll(".edge").forEach(function (p) { p.classList.toggle("near", on && (p.getAttribute("data-a") === id || p.getAttribute("data-b") === id)); });
-      var c = concept(id);
+      var c = id === m.root ? { title: data.topic, summaryHtml: "", researched: true } : concept(id);
       if (on && c) {
-        tip.replaceChildren(el("strong", { text: c.title }), c.summaryHtml ? el("span", { html: c.summaryHtml }) : el("span", { text: c.researched ? "" : "Not researched yet" }));
+        fill(tip, el("strong", { text: c.title }), c.summaryHtml ? el("span", { html: c.summaryHtml }) : el("span", { text: c.researched ? "" : "Not researched yet" }));
         tip.hidden = false;
         var rect = canvas.getBoundingClientRect(), n = nodes[id];
         tip.style.left = Math.min(rect.width - 300, Math.max(8, (n.x - box[0]) / box[2] * rect.width + 16)) + "px";
@@ -377,7 +386,7 @@
 
     function control(label, text, action) { var b = el("button", { type: "button", "aria-label": label, text: text }); b.addEventListener("click", action); return b; }
     var center = function () { return [box[0] + box[2] / 2, box[1] + box[3] / 2]; };
-    view.replaceChildren(
+    fill(view,
       el("h1", { class: "section-title", text: "Concept map" }),
       el("p", { class: "section-lede", text: "Each concept sits under the broader one it belongs to. Dashed lines lead from what to learn first. Hover to preview, click to open; drag to move, scroll to zoom." }),
       el("div", { class: "map-wrap" }, [
@@ -403,7 +412,7 @@
         level ? el("div", { class: "prose", html: c.levels[level] }) : (c.summaryHtml ? el("p", { html: c.summaryHtml }) : null)
       ]);
     });
-    view.replaceChildren(
+    fill(view,
       el("h1", { class: "section-title", text: "Read it all" }),
       el("p", { class: "section-lede", text: "Every concept in learning order, as one article at your chosen depth." }),
       depthControl(null, readView),
@@ -431,9 +440,9 @@
         if (ev.target.closest(".cite")) { return; }
         var flipped = card.getAttribute("aria-pressed") === "true";
         card.setAttribute("aria-pressed", String(!flipped));
-        card.replaceChildren.apply(card, flipped
+        fill.apply(null, [card].concat(flipped
           ? [el("span", { class: "card-front", text: c.title }), el("small", { text: "Recall it, then click to check" })]
-          : [el("span", { class: "card-back", html: back || "No summary yet." }), el("small", { text: c.title })]);
+          : [el("span", { class: "card-back", html: back || "No summary yet." }), el("small", { text: c.title })]));
         decorate(card);
       });
       return card;
@@ -443,7 +452,7 @@
       var claim = data.claims[id];
       return el("li", {}, [el("span", { html: claim.textHtml }), " ", el("button", { type: "button", class: "cite", "data-claim": id, "data-status": claim.status, text: String(claim.number) })]);
     });
-    view.replaceChildren(
+    fill(view,
       el("h1", { class: "section-title", text: "Revise" }),
       el("p", { class: "section-lede", text: "Test yourself: name what each concept is, then flip the card." }),
       el("div", { class: "cards" }, cards),
@@ -473,7 +482,7 @@
     var runs = data.runs.map(function (r) {
       return el("tr", {}, [el("td", { text: r.started }), el("td", { text: r.status }), el("td", { class: "num", text: String(r.steps) }), el("td", { class: "num", text: r.tokens.toLocaleString() }), el("td", { class: "num", text: r.cost })]);
     });
-    view.replaceChildren(
+    fill(view,
       el("h1", { class: "section-title", text: "Sources and method" }),
       el("p", { class: "section-lede", text: "Every page the agent read. Claims are only recorded with a passage quoted from one of these, checked word for word." }),
       el("ol", { class: "source-list" }, sources.length ? sources : [el("li", { text: "No sources yet." })]),
@@ -494,7 +503,7 @@
   }
 
   function notFound() {
-    view.replaceChildren(el("h1", { class: "section-title", text: "Not found" }), el("p", {}, [el("a", { href: "#/", text: "Back to the overview" })]));
+    fill(view, el("h1", { class: "section-title", text: "Not found" }), el("p", {}, [el("a", { href: "#/", text: "Back to the overview" })]));
   }
 
   function footer() {

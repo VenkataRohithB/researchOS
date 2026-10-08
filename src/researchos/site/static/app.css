@@ -105,7 +105,9 @@ code, kbd { font-family: var(--mono); font-size: 0.85em; }
 .bar-tools button:hover { color: var(--ink); }
 .bar-tools kbd { border: 1px solid var(--rule); border-radius: 4px; padding: 0 0.3em; margin-left: 0.3em; }
 
-main { max-width: 74rem; margin: 0 auto; padding: 3rem clamp(1rem, 4vw, 3rem) 5rem; outline: none; }
+main { max-width: 74rem; margin: 0 auto; padding: 3rem clamp(1rem, 4vw, 3rem) 5rem; }
+/* Focus moves to the view after navigation for screen readers; it needs no visible ring. */
+#view:focus, #view:focus-visible { outline: none; }
 
 /* Overview -------------------------------------------------------------------------------- */
 
@@ -211,7 +213,8 @@ main { max-width: 74rem; margin: 0 auto; padding: 3rem clamp(1rem, 4vw, 3rem) 5r
 .depth-scale { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; max-width: 34rem; }
 .depth-scale button {
   position: relative; text-align: left; cursor: pointer;
-  border: 0; background: transparent; padding: 0.9rem 0 0.2rem; color: var(--muted); font-size: 0.82rem;
+  border: 0; background: transparent; padding: 0.9rem 0 0.2rem; color: var(--muted);
+  font-size: clamp(0.62rem, 2.5vw, 0.82rem); white-space: nowrap;
 }
 .depth-scale button::before {
   content: ""; position: absolute; left: 0; right: 0; top: 0; height: 6px; border-radius: 3px;
@@ -291,10 +294,10 @@ main { max-width: 74rem; margin: 0 auto; padding: 3rem clamp(1rem, 4vw, 3rem) 5r
 .map .edge { stroke: var(--rule); stroke-width: 1.5; fill: none; }
 .map .edge.prerequisite { stroke-dasharray: 5 5; stroke: color-mix(in srgb, var(--accent) 50%, var(--rule)); }
 .map .node circle { fill: var(--surface); stroke: var(--accent); stroke-width: 2; transition: r 120ms ease; }
-.map .node.stub circle { stroke: var(--rule); stroke-dasharray: 3 3; }
+.map .node.stub circle { stroke: var(--muted); stroke-dasharray: 3 3; opacity: 0.8; }
 .map .node.root circle { fill: var(--accent); stroke: none; }
-.map .node text { font: 600 13px var(--sans); fill: var(--ink); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
-.map .node.root text { font-size: 15px; fill: #fff; stroke: none; }
+.map .node text { font: 600 15px var(--sans); fill: var(--ink); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
+.map .node.root text { font-size: 17px; font-weight: 700; }
 .map .node { cursor: pointer; }
 .map .node:hover circle, .map .node:focus circle { stroke-width: 3.5; }
 .map.focusing .node:not(.near), .map.focusing .edge:not(.near) { opacity: 0.18; }
@@ -382,7 +385,6 @@ main { max-width: 74rem; margin: 0 auto; padding: 3rem clamp(1rem, 4vw, 3rem) 5r
   .bar { flex-wrap: wrap; gap: 0.5rem 1rem; }
   .bar-nav { order: 3; width: 100%; overflow-x: auto; margin: 0; }
   main { padding-top: 2rem; }
-  .depth-scale button { font-size: 0.72rem; }
   .plan li { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }
 }
 @media (prefers-reduced-motion: reduce) {
