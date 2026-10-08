@@ -53,6 +53,13 @@ class AgendaItem(BaseModel):
     """Claims that cover this item; required for it to count as done."""
 
 
+class Clarification(BaseModel):
+    question: str
+    answer: str | None
+    """None when nobody was available to answer."""
+    asked_at: datetime
+
+
 class RunRecord(BaseModel):
     run_id: str
     started_at: datetime
@@ -71,6 +78,7 @@ class ResearchState(BaseModel):
     summary: str | None = None
     """Synthesis from the most recent `finish_research`."""
     reviewed_claims: list[str] = Field(default_factory=list)
+    clarifications: list[Clarification] = Field(default_factory=list)
     """Weakly supported claims the agent has already been asked to cross-check."""
     runs: list[RunRecord] = Field(default_factory=list)
 

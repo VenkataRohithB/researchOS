@@ -91,7 +91,11 @@ class UsageMeter:
         self._steps += 1
         return self._steps
 
-    def record_llm_call(self, *, model: str, usage: Usage, latency_seconds: float) -> None:
+    def record_llm_call(
+        self, *, model: str, usage: Usage, latency_seconds: float, purpose: str = "agent"
+    ) -> None:
+        """Record a completed model call. `purpose` says what it was for ("agent" for the main
+        loop, "study" or "explain" for focused calls made by tools)."""
         cost = self._pricing.cost(usage)
         self._llm_calls += 1
         self._input_tokens += usage.input_tokens
@@ -99,6 +103,7 @@ class UsageMeter:
         self._cost += cost
         self._log(
             "llm_call",
+            purpose=purpose,
             model=model,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
@@ -106,8 +111,12 @@ class UsageMeter:
             latency_seconds=latency_seconds,
         )
 
-    def record_llm_failure(self, *, model: str, error: str, latency_seconds: float) -> None:
-        self._log("llm_error", model=model, error=error, latency_seconds=latency_seconds)
+    def record_llm_failure(
+        self, *, model: str, error: str, latency_seconds: float, purpose: str = "agent"
+    ) -> None:
+        self._log(
+            "llm_error", purpose=purpose, model=model, error=error, latency_seconds=latency_seconds
+        )
 
     def record_tool_call(self, *, name: str, ok: bool, latency_seconds: float) -> None:
         self._tool_calls += 1

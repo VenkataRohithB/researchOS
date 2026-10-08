@@ -8,10 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from researchos.agent import ResearchAgent
+from researchos.focused import FocusedModel
 from researchos.llm import LLMClient, LLMResponse, Message, ToolCall, ToolSpec, Usage
 from researchos.project import EvidenceInput, Project, ResearchRequest
 from researchos.tools import ToolRegistry, build_research_tools
 from researchos.usage import Limits, Pricing, UsageMeter
+from researchos.user import NoUser, UserChannel
 from researchos.web import FetchedPage, MockFetcher, MockSearch
 
 SEED_URL = "https://seed.example/background"
@@ -67,14 +69,25 @@ def agent_for(
     max_cost_usd: float = 10.0,
     context_turns: int = 6,
     run_id: str = "test-run",
+    reader: LLMClient | None = None,
+    user: UserChannel | None = None,
 ) -> ResearchAgent:
+    """`reader` answers the focused calls tools make (study_source); defaults to `llm`."""
     meter = UsageMeter(
         limits=Limits(max_steps=max_steps, max_cost_usd=max_cost_usd, max_wall_seconds=60),
         pricing=Pricing(input_per_million=1.0, output_per_million=2.0),
         events_path=project.events_path,
         run_id=run_id,
     )
-    tools = ToolRegistry(build_research_tools(project, MockSearch(), MockFetcher()))
+    tools = ToolRegistry(
+        build_research_tools(
+            project,
+            MockSearch(),
+            MockFetcher(),
+            focused=FocusedModel(reader or llm, meter),
+            user=user or NoUser(),
+        )
+    )
     return ResearchAgent(
         llm=llm,
         tools=tools,

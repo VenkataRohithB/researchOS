@@ -24,9 +24,10 @@ def test_mock_model_completes_full_research_loop(tmp_path: Path) -> None:
     assert project.assess(claim).status == "single_source"
     assert "## Summary" in result.report_path.read_text()
     events = [json.loads(line) for line in project.events_path.read_text().splitlines()]
-    assert [e["event"] for e in events].count(
-        "llm_call"
-    ) == 7  # includes one finish sent back for review
+    purposes = [e["purpose"] for e in events if e["event"] == "llm_call"]
+    # 7 agent steps (one finish is sent back for review) and one study of the fetched page.
+    assert purposes.count("agent") == 7
+    assert purposes.count("study") == 1
     assert events[-1]["event"] == "run_end"
 
 

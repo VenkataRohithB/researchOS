@@ -6,10 +6,37 @@ from typing import Any
 
 import pytest
 
+from researchos.focused import FocusedModel
 from researchos.llm import ToolCall
 from researchos.project import Project, ResearchRequest
 from researchos.tools import ToolRegistry, build_research_tools
+from researchos.usage import Limits, Pricing, UsageMeter
+from researchos.user import NoUser
 from researchos.web import FetchedPage, MockFetcher, MockSearch
+
+
+class _Unused:
+    model = "unused"
+
+    def chat(self, messages: Any, tools: Any) -> Any:
+        raise AssertionError("these tools make no model calls")
+
+    def close(self) -> None:
+        pass
+
+
+WIRING: dict[str, Any] = {
+    "focused": FocusedModel(
+        _Unused(),
+        UsageMeter(
+            limits=Limits(max_steps=1, max_cost_usd=1, max_wall_seconds=1),
+            pricing=Pricing(input_per_million=0, output_per_million=0),
+            events_path=Path("/dev/null"),
+            run_id="t",
+        ),
+    ),
+    "user": NoUser(),
+}
 
 TEXT_A = (
     "Unified memory lets the CPU and GPU share one pool of memory.\n"
@@ -33,7 +60,7 @@ def ids(project: Project) -> tuple[str, str]:
 
 
 def run(project: Project, name: str, **arguments: Any) -> dict[str, Any]:
-    tools = ToolRegistry(build_research_tools(project, MockSearch(), MockFetcher()))
+    tools = ToolRegistry(build_research_tools(project, MockSearch(), MockFetcher(), **WIRING))
     outcome = tools.execute(ToolCall(id="c", name=name, arguments=json.dumps(arguments)))
     result: dict[str, Any] = json.loads(outcome.content)
     return result
@@ -161,7 +188,7 @@ def test_fetching_a_copy_of_a_source_warns_that_it_is_not_independent(tmp_path: 
         {"https://arxiv.org/abs/1": article, "https://mirror.example/1": "Mirror. " + article}
     )
     project = Project.create(tmp_path, ResearchRequest(topic="t"))
-    tools = ToolRegistry(build_research_tools(project, MockSearch(), fetcher))
+    tools = ToolRegistry(build_research_tools(project, MockSearch(), fetcher, **WIRING))
 
     def fetch(url: str) -> dict[str, Any]:
         outcome = tools.execute(

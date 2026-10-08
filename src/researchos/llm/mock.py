@@ -1,13 +1,15 @@
 """Offline stand-in for a real model.
 
-`MockLLM` does not reason. It follows a fixed plan -> search -> fetch -> claim -> close -> finish
-trajectory, reading the previous tool results so it exercises the real harness end to end
-(tool validation, persistence, budget accounting) without credentials or network access.
+`MockLLM` does not reason. As the agent it follows a fixed plan -> search -> fetch -> study ->
+close -> finish trajectory, deciding each step from the state snapshot; asked to study a
+source it returns one claim quoting the mock page. This exercises the real harness end to end (tool
+validation, quote checks, persistence, budget accounting) without credentials or network.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from itertools import count
 from typing import Any
@@ -27,53 +29,64 @@ class MockLLM:
         self._ids = count(1)
 
     def chat(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> LLMResponse:
-        names = [call.name for m in messages if m.role == "assistant" for call in m.tool_calls]
-        called = set(names)
+        if any(tool.name == "submit_study" for tool in tools):
+            return self._respond(messages, self._study(messages))
+        return self._respond(messages, self._next_step(messages))
+
+    def _next_step(self, messages: Sequence[Message]) -> Message:
+        """Choose the next action from the state snapshot, as a real model would."""
+        snapshot = next((m.content for m in messages if m.role == "user" and m.content), "")
+        topic = snapshot.splitlines()[0].removeprefix("Topic:").strip() if snapshot else ""
         last_result = _last_tool_result(messages)
-        topic = _topic(messages)
+        open_items = re.findall(r"^- (a\d+) \[open\]", snapshot, re.MULTILINE)
+        unstudied = re.findall(r"(src-[0-9a-f]+) \[[a-z]+, not studied yet", snapshot)
+        claims = re.findall(r"^- (claim-\d+) \[", snapshot, re.MULTILINE)
+        no_sources = "## Sources fetched (0)" in snapshot
+        finish = self._call("finish_research", summary=f"Mock research on '{topic}' complete.")
 
         if last_result is not None and "error" in last_result:
             # Usually the pre-finish review; this script cannot act on errors, so it finishes.
-            message = self._call("finish_research", summary=f"Mock research on '{topic}' complete.")
-        elif "update_agenda" not in called:
-            message = self._call("update_agenda", add=[f"Understand the basics of {topic}"])
-        elif "search_web" not in called:
-            message = self._call("search_web", query=topic, max_results=3)
-        elif "fetch_source" not in called:
-            results = (last_result or {}).get("results") or []
-            if not results:
-                message = self._call("finish_research", summary="No search results were found.")
-            else:
-                message = self._call("fetch_source", url=results[0]["url"])
-        elif "record_claim" not in called:
-            source_id = (last_result or {}).get("source_id")
-            message = self._call(
-                "record_claim",
-                text=f"The fetched page about {topic} is synthetic test content.",
-                kind="fact",
-                evidence=[{"source_id": source_id, "quote": MOCK_PAGE_QUOTE}] if source_id else [],
-            )
-        elif names.count("update_agenda") < 2 and "claim_id" in (last_result or {}):
-            covered = {"id": "a1", "status": "done", "claim_ids": [(last_result or {})["claim_id"]]}
-            message = self._call("update_agenda", update=[covered])
-        else:
-            message = self._call("finish_research", summary=f"Mock research on '{topic}' complete.")
-
-        return LLMResponse(
-            message=message, usage=_estimate_usage(messages, message), model=self.model
-        )
+            return finish
+        if "## Agenda\nEmpty." in snapshot:
+            return self._call("update_agenda", add=[f"Understand the basics of {topic}"])
+        if no_sources:
+            results = (last_result or {}).get("results")
+            if results:
+                return self._call("fetch_source", url=results[0]["url"])
+            if results is not None:
+                return self._call("finish_research", summary="No search results were found.")
+            return self._call("search_web", query=topic, max_results=3)
+        if unstudied:
+            return self._call("study_source", source_id=unstudied[0])
+        if open_items and claims:
+            covered = [{"id": item, "status": "done", "claim_ids": claims} for item in open_items]
+            return self._call("update_agenda", update=covered)
+        return finish
 
     def close(self) -> None:
         pass
 
+    def _study(self, messages: Sequence[Message]) -> Message:
+        request = next((m.content for m in messages if m.role == "user" and m.content), "")
+        topic = request.splitlines()[0].removeprefix("Research topic:").strip()
+        return self._call(
+            "submit_study",
+            claims=[
+                {
+                    "text": f"The source about {topic} is synthetic test content.",
+                    "quote": MOCK_PAGE_QUOTE,
+                    "concepts": [topic],
+                }
+            ],
+            concepts=[{"title": topic, "summary": f"The subject being researched: {topic}."}],
+        )
+
+    def _respond(self, messages: Sequence[Message], reply: Message) -> LLMResponse:
+        return LLMResponse(message=reply, usage=_estimate_usage(messages, reply), model=self.model)
+
     def _call(self, name: str, **arguments: Any) -> Message:
         call = ToolCall(id=f"mock-{next(self._ids)}", name=name, arguments=json.dumps(arguments))
         return Message(role="assistant", tool_calls=(call,))
-
-
-def _topic(messages: Sequence[Message]) -> str:
-    first_user = next((m.content for m in messages if m.role == "user" and m.content), "")
-    return first_user.splitlines()[0].removeprefix("Topic:").strip() if first_user else ""
 
 
 def _last_tool_result(messages: Sequence[Message]) -> dict[str, Any] | None:

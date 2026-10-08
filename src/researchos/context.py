@@ -21,12 +21,14 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from researchos.knowledge import Concept
 from researchos.llm import Message, ToolCall
 from researchos.project import Project
 from researchos.untrusted import untrusted
 from researchos.usage import Limits, UsageSummary
 
 MAX_CLAIMS_IN_CONTEXT = 30
+MAX_CONCEPTS_IN_CONTEXT = 60
 MAX_SOURCES_IN_CONTEXT = 50
 MAX_DIRECTIVES_IN_CONTEXT = 10
 
@@ -107,6 +109,13 @@ def render_snapshot(project: Project, *, usage: UsageSummary, limits: Limits) ->
         out += ["", "## Instructions from the user (latest last; these override your plan)"]
         out += [f"- [{d.created_at:%Y-%m-%d %H:%M}] {d.text}" for d in directives]
 
+    if state.clarifications:
+        out += ["", "## Questions you asked the user"]
+        out += [
+            f"- {c.question} -> {c.answer if c.answer else '(no answer; assume and state it)'}"
+            for c in state.clarifications
+        ]
+
     out += ["", "## Agenda"]
     if state.agenda:
         out += [
@@ -122,11 +131,13 @@ def render_snapshot(project: Project, *, usage: UsageSummary, limits: Limits) ->
         out += ["", "## Summary from the previous run", state.summary]
 
     sources = project.sources()
+    claims = project.claims()
+    studied = {e.source_id for c in claims for e in c.evidence}
     out += ["", f"## Sources fetched ({len(sources)})"]
     if sources:
         shown = sources[-MAX_SOURCES_IN_CONTEXT:]
         listing = "\n".join(
-            f"{s.id} [{s.tier}"
+            f"{s.id} [{s.tier}, {'used as evidence' if s.id in studied else 'not studied yet'}"
             + (f", duplicate of {s.duplicate_of}" if s.duplicate_of else "")
             + f"]: {s.title} <{s.url}>"
             for s in shown
@@ -137,7 +148,10 @@ def render_snapshot(project: Project, *, usage: UsageSummary, limits: Limits) ->
     else:
         out.append("None yet.")
 
-    claims = project.claims()
+    concepts = project.concepts()
+    out += ["", f"## Concepts ({len(concepts)})"]
+    out += _concept_tree(project) or ["None yet. study_source adds them as you read."]
+
     assessments = {c.id: project.assess(c) for c in claims}
     counts = Counter(a.status for a in assessments.values())
     out += [
@@ -166,6 +180,30 @@ def render_snapshot(project: Project, *, usage: UsageSummary, limits: Limits) ->
         f"time {usage.elapsed_seconds:.0f}s/{limits.max_wall_seconds:.0f}s",
     ]
     return "\n".join(out)
+
+
+def _concept_tree(project: Project) -> list[str]:
+    """Concepts indented under their parents, with claim counts, capped in size."""
+    concepts = project.concepts()
+    children: dict[str | None, list[Concept]] = {}
+    for concept in concepts:
+        children.setdefault(concept.parent, []).append(concept)
+    lines: list[str] = []
+
+    def walk(parent: str | None, depth: int) -> None:
+        for concept in children.get(parent, []):
+            if len(lines) >= MAX_CONCEPTS_IN_CONTEXT:
+                return
+            explained = ", explained" if concept.explanations else ""
+            lines.append(
+                f"{'  ' * depth}- {concept.title} ({len(concept.claim_ids)} claims{explained})"
+            )
+            walk(concept.id, depth + 1)
+
+    walk(None, 0)
+    if len(concepts) > len(lines):
+        lines.append(f"({len(concepts) - len(lines)} more; use list_concepts.)")
+    return lines
 
 
 def _message_to_json(message: Message) -> dict[str, Any]:

@@ -3,23 +3,31 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from researchos.evidence import ClaimKind, ClaimStatus, SourceTier, Stance, words
+from researchos.focused import FocusedModel
+from researchos.knowledge import Concept
 from researchos.project import (
     EvidenceError,
     EvidenceInput,
     Project,
     Source,
     UnknownClaimError,
+    UnknownConceptError,
     UnknownSourceError,
 )
-from researchos.state import Phase
+from researchos.state import Clarification, Phase
 from researchos.tools.registry import Tool, ToolError
+from researchos.tools.study import StudySourceArgs, study_source
 from researchos.untrusted import untrusted
+from researchos.user import UserChannel
 from researchos.web import Fetcher, FetchError, SearchError, SearchProvider
+
+MAX_QUESTIONS_PER_PROJECT = 9
 
 FETCH_EXCERPT_CHARS = 4_000
 PASSAGE_CHARS = 700
@@ -125,6 +133,29 @@ class UpdateAgendaArgs(_Args):
     update: list[AgendaUpdate] = Field(default_factory=list, max_length=50)
 
 
+class AskUserArgs(_Args):
+    questions: list[str] = Field(
+        min_length=1,
+        max_length=3,
+        description="Short, specific questions; each should change what you research.",
+    )
+
+
+class GetConceptArgs(_Args):
+    concept: str = Field(description="Concept id or title.")
+
+
+class UpdateConceptArgs(_Args):
+    concept: str = Field(description="Concept id or title.")
+    title: str | None = Field(default=None, max_length=120)
+    summary: str | None = Field(default=None, max_length=600)
+    parent: str | None = Field(
+        default=None, description="Broader concept it belongs under; empty string for top level."
+    )
+    prerequisites: list[str] | None = Field(default=None, max_length=10)
+    related: list[str] | None = Field(default=None, max_length=10)
+
+
 class SetPhaseArgs(_Args):
     phase: Phase
     reason: str = Field(min_length=1, max_length=300)
@@ -136,7 +167,14 @@ class FinishResearchArgs(_Args):
     )
 
 
-def build_research_tools(project: Project, search: SearchProvider, fetcher: Fetcher) -> list[Tool]:
+def build_research_tools(
+    project: Project,
+    search: SearchProvider,
+    fetcher: Fetcher,
+    *,
+    focused: FocusedModel,
+    user: UserChannel,
+) -> list[Tool]:
     def search_web(args: SearchWebArgs) -> dict[str, Any]:
         try:
             results = search.search(args.query, args.max_results)
@@ -262,6 +300,76 @@ def build_research_tools(project: Project, search: SearchProvider, fetcher: Fetc
             ],
         }
 
+    def study(args: StudySourceArgs) -> dict[str, Any]:
+        return study_source(project, focused, args)
+
+    def ask_user(args: AskUserArgs) -> dict[str, Any]:
+        asked = len(project.state.clarifications)
+        if asked + len(args.questions) > MAX_QUESTIONS_PER_PROJECT:
+            raise ToolError(
+                f"question limit reached ({MAX_QUESTIONS_PER_PROJECT} per project); proceed "
+                "with stated assumptions"
+            )
+        answers = user.ask(args.questions)
+        now = datetime.now(UTC)
+        project.state.clarifications += [
+            Clarification(
+                question=q, answer=(answers[i] or None) if answers else None, asked_at=now
+            )
+            for i, q in enumerate(args.questions)
+        ]
+        if answers is None:
+            return {
+                "answered": False,
+                "note": "Nobody is available to answer. Proceed on clearly stated assumptions "
+                "and mention them in the summary.",
+            }
+        return {
+            "answered": True,
+            "answers": [
+                {"question": q, "answer": a or "(skipped)"}
+                for q, a in zip(args.questions, answers, strict=False)
+            ],
+        }
+
+    def list_concepts(args: _Args) -> dict[str, Any]:
+        concepts = project.concepts()
+        return {
+            "total": len(concepts),
+            "concepts": [_concept_brief(project, c) for c in concepts],
+        }
+
+    def get_concept(args: GetConceptArgs) -> dict[str, Any]:
+        concept = _concept(project, args.concept)
+        return {
+            **_concept_brief(project, concept),
+            "summary": concept.summary,
+            "prerequisites": concept.prerequisites,
+            "related": concept.related,
+            "children": [c.id for c in project.children(concept.id)],
+            "claims": [
+                {
+                    "claim_id": cid,
+                    "status": project.assess(project.get_claim(cid)).status,
+                    "text": project.get_claim(cid).text,
+                }
+                for cid in concept.claim_ids
+            ],
+            "explained_levels": list(concept.explanations),
+        }
+
+    def update_concept(args: UpdateConceptArgs) -> dict[str, Any]:
+        _concept(project, args.concept)
+        change = project.update_concept(
+            args.concept,
+            title=args.title,
+            summary=args.summary,
+            parent=args.parent,
+            prerequisites=args.prerequisites,
+            related=args.related,
+        )
+        return {**_concept_brief(project, change.concept), "problems": change.problems}
+
     def update_agenda(args: UpdateAgendaArgs) -> dict[str, Any]:
         known = {item.id for item in project.state.agenda}
         unknown = [u.id for u in args.update if u.id not in known]
@@ -331,6 +439,48 @@ def build_research_tools(project: Project, search: SearchProvider, fetcher: Fetc
         return {"report": str(path.relative_to(project.root))}
 
     return [
+        Tool(
+            name="ask_user",
+            description=(
+                "Ask the person you are researching for up to 3 short questions, when the "
+                "answer would change what you research: an ambiguous topic or acronym, their "
+                "goal, level or focus. Don't ask what you can find out yourself."
+            ),
+            args_model=AskUserArgs,
+            handler=ask_user,
+        ),
+        Tool(
+            name="study_source",
+            description=(
+                "Study a fetched source thoroughly: a dedicated reading pass extracts claims "
+                "with verified quotes, corroborates or contradicts claims already recorded, "
+                "and adds concepts to the knowledge graph. Use it on every source worth "
+                "reading; it is how research gets recorded."
+            ),
+            args_model=StudySourceArgs,
+            handler=study,
+        ),
+        Tool(
+            name="list_concepts",
+            description="List the knowledge graph's concepts with their parent and claim counts.",
+            args_model=_Args,
+            handler=list_concepts,
+        ),
+        Tool(
+            name="get_concept",
+            description="Show a concept with its relationships, children and claims.",
+            args_model=GetConceptArgs,
+            handler=get_concept,
+        ),
+        Tool(
+            name="update_concept",
+            description=(
+                "Correct a concept: rename it, rewrite its summary, move it under another "
+                "parent, or set its prerequisites and related concepts."
+            ),
+            args_model=UpdateConceptArgs,
+            handler=update_concept,
+        ),
         Tool(
             name="search_web",
             description="Search the web. Returns titles, URLs and snippets (untrusted).",
@@ -457,4 +607,21 @@ def _describe_claim(project: Project, claim_id: str) -> dict[str, Any]:
         "status": assessment.status,
         "independent_supporting_sources": assessment.supporting_sources,
         "independent_contradicting_sources": assessment.contradicting_sources,
+    }
+
+
+def _concept(project: Project, ref: str) -> Concept:
+    try:
+        return project.get_concept(ref)
+    except UnknownConceptError:
+        raise ToolError(f"unknown concept '{ref}'; see list_concepts") from None
+
+
+def _concept_brief(project: Project, concept: Concept) -> dict[str, Any]:
+    return {
+        "id": concept.id,
+        "title": concept.title,
+        "parent": concept.parent,
+        "claims": len(concept.claim_ids),
+        "children": len(project.children(concept.id)),
     }

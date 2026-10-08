@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -74,3 +75,51 @@ def test_runs_build_a_website_and_build_regenerates_it(
 
     assert site.is_file()
     assert f"Website: {site}" in capsys.readouterr().out
+
+
+def answers(*replies: str) -> Callable[[str], str]:
+    queue = list(replies)
+
+    def prompt(question: str) -> str:
+        return queue.pop(0)
+
+    return prompt
+
+
+def test_a_bare_topic_starts_research(workspace: Path) -> None:
+    assert main(["-q", "Unified memory"]) == EXIT_OK
+
+    project = Project.open(workspace, only_project(workspace))
+    assert project.metadata.request.topic == "Unified memory"
+
+
+def test_without_a_topic_it_asks_for_one(workspace: Path) -> None:
+    assert main(["-q"], prompt=answers("Nanosheet transistors", "")) == EXIT_OK
+
+    project = Project.open(workspace, only_project(workspace))
+    assert project.metadata.request.topic == "Nanosheet transistors"
+    assert main(["-q"], prompt=answers("")) == EXIT_USAGE_ERROR
+
+
+def test_improvement_requests_continue_the_same_project(workspace: Path) -> None:
+    prompt = answers("Go deeper on the GPU side", "Explain it more simply", "")
+
+    assert main(["-q", "Unified memory"], prompt=prompt) == EXIT_OK
+
+    project = Project.open(workspace, only_project(workspace))
+    assert [d.text for d in project.directives()] == [
+        "Improvement requested: Go deeper on the GPU side",
+        "Improvement requested: Explain it more simply",
+    ]
+    assert len(project.state.runs) == 3
+
+
+def test_improve_command_builds_on_an_existing_project(workspace: Path) -> None:
+    assert main(["-q", "Unified memory"]) == EXIT_OK
+    project_id = only_project(workspace)
+
+    assert main(["-q", "improve", project_id, "add a comparison with discrete GPUs"]) == EXIT_OK
+
+    project = Project.open(workspace, project_id)
+    assert project.directives()[-1].text.endswith("add a comparison with discrete GPUs")
+    assert len(project.state.runs) == 2

@@ -11,6 +11,7 @@ Layout::
         sources/sources.json    registry of fetched sources
         sources/snapshots/      extracted text of each source, as fetched
         knowledge/claims.json   claims, each with quoted evidence from sources
+        knowledge/concepts.json concepts and their relationships (the knowledge graph)
         report.md               human-readable output
 """
 
@@ -47,6 +48,7 @@ from researchos.evidence import (
     is_near_duplicate,
     site_of,
 )
+from researchos.knowledge import Concept, Level, concept_id
 from researchos.state import ResearchState
 from researchos.web import FetchedPage
 
@@ -102,6 +104,18 @@ class UnknownClaimError(KeyError):
     pass
 
 
+class UnknownConceptError(KeyError):
+    pass
+
+
+@dataclass(frozen=True)
+class ConceptChange:
+    concept: Concept
+    created: bool
+    problems: list[str]
+    """Requested changes that were refused, e.g. a parent link that would form a cycle."""
+
+
 class Directive(BaseModel):
     text: str
     created_at: datetime
@@ -137,6 +151,14 @@ class Project:
             c["id"]: Claim.model_validate(c)
             for c in json.loads(self._claims_path.read_text(encoding="utf-8"))
         }
+        self._concepts: dict[str, Concept] = (
+            {
+                c["id"]: Concept.model_validate(c)
+                for c in json.loads(self._concepts_path.read_text(encoding="utf-8"))
+            }
+            if self._concepts_path.exists()
+            else {}
+        )
 
     @classmethod
     def open(cls, workspace_dir: Path, ref: str) -> Project:
@@ -215,6 +237,10 @@ class Project:
     @property
     def _claims_path(self) -> Path:
         return self.root / "knowledge" / "claims.json"
+
+    @property
+    def _concepts_path(self) -> Path:
+        return self.root / "knowledge" / "concepts.json"
 
     # Sources -------------------------------------------------------------------------
 
@@ -405,6 +431,148 @@ class Project:
             self._claims_path, json.dumps([c.model_dump(mode="json") for c in claims], indent=2)
         )
 
+    # Concepts ------------------------------------------------------------------------
+
+    def concepts(self) -> list[Concept]:
+        return list(self._concepts.values())
+
+    def get_concept(self, ref: str) -> Concept:
+        """Find a concept by id, title or alias."""
+        found = self._resolve(ref)
+        if found is None:
+            raise UnknownConceptError(ref)
+        return self._concepts[found]
+
+    def merge_concept(
+        self,
+        title: str,
+        *,
+        summary: str | None = None,
+        parent: str | None = None,
+        prerequisites: Sequence[str] = (),
+        related: Sequence[str] = (),
+        aliases: Sequence[str] = (),
+        claim_ids: Sequence[str] = (),
+    ) -> ConceptChange:
+        """Add what is new without overwriting what exists: fill empty fields and extend
+        lists. Referenced concepts that do not exist yet are created as stubs."""
+        existing = self._resolve(title)
+        created = existing is None
+        current = self._concepts[existing] if existing else self._new_concept(title)
+        problems: list[str] = []
+        update: dict[str, Any] = {
+            "aliases": _union(current.aliases, [a for a in aliases if a != current.title]),
+            "prerequisites": _union(current.prerequisites, self._refs(prerequisites, current.id)),
+            "related": _union(current.related, self._refs(related, current.id)),
+            "claim_ids": _union(current.claim_ids, [c for c in claim_ids if c in self._claims]),
+        }
+        if summary and not current.summary:
+            update["summary"] = summary
+        if parent and current.parent is None:
+            update["parent"], problem = self._checked_parent(current.id, parent)
+            problems += [problem] if problem else []
+        concept = current.model_copy(update={**update, "updated_at": datetime.now(UTC)})
+        self._concepts[concept.id] = concept
+        self._save_concepts()
+        return ConceptChange(concept=concept, created=created, problems=problems)
+
+    def update_concept(
+        self,
+        ref: str,
+        *,
+        title: str | None = None,
+        summary: str | None = None,
+        parent: str | None = None,
+        prerequisites: Sequence[str] | None = None,
+        related: Sequence[str] | None = None,
+    ) -> ConceptChange:
+        """Set fields explicitly (the agent correcting the graph). An empty `parent` makes the
+        concept top-level."""
+        current = self.get_concept(ref)
+        problems: list[str] = []
+        update: dict[str, Any] = {"updated_at": datetime.now(UTC)}
+        if title:
+            update["title"] = title
+        if summary is not None:
+            update["summary"] = summary
+        if parent is not None:
+            if parent == "":
+                update["parent"] = None
+            else:
+                update["parent"], problem = self._checked_parent(current.id, parent)
+                problems += [problem] if problem else []
+        if prerequisites is not None:
+            update["prerequisites"] = self._refs(prerequisites, current.id)
+        if related is not None:
+            update["related"] = self._refs(related, current.id)
+        concept = current.model_copy(update=update)
+        self._concepts[concept.id] = concept
+        self._save_concepts()
+        return ConceptChange(concept=concept, created=False, problems=problems)
+
+    def set_explanations(self, ref: str, explanations: dict[Level, str]) -> Concept:
+        current = self.get_concept(ref)
+        concept = current.model_copy(
+            update={
+                "explanations": {**current.explanations, **explanations},
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self._concepts[concept.id] = concept
+        self._save_concepts()
+        return concept
+
+    def children(self, ref: str) -> list[Concept]:
+        parent = self.get_concept(ref).id
+        return [c for c in self._concepts.values() if c.parent == parent]
+
+    def _resolve(self, ref: str) -> str | None:
+        if ref in self._concepts:
+            return ref
+        key = concept_id(ref)
+        if key in self._concepts:
+            return key
+        for concept in self._concepts.values():
+            if any(concept_id(alias) == key for alias in concept.aliases):
+                return concept.id
+        return None
+
+    def _new_concept(self, title: str) -> Concept:
+        now = datetime.now(UTC)
+        return Concept(id=concept_id(title), title=title.strip(), created_at=now, updated_at=now)
+
+    def _refs(self, titles: Sequence[str], own_id: str) -> list[str]:
+        """Ids for referenced concepts, creating stubs for unknown ones."""
+        ids: list[str] = []
+        for title in titles:
+            if not title.strip():
+                continue
+            ref = self._resolve(title)
+            if ref is None:
+                stub = self._new_concept(title)
+                self._concepts[stub.id] = stub
+                ref = stub.id
+            if ref != own_id:
+                ids.append(ref)
+        return ids
+
+    def _checked_parent(self, own_id: str, parent: str) -> tuple[str | None, str | None]:
+        (parent_id,) = self._refs([parent], own_id) or (None,)
+        if parent_id is None:
+            return None, f"{own_id} cannot be its own parent"
+        ancestor: str | None = parent_id
+        while ancestor is not None:
+            if ancestor == own_id:
+                return None, f"making {parent_id} the parent of {own_id} would form a cycle"
+            ancestor = self._concepts[ancestor].parent
+        return parent_id, None
+
+    def _save_concepts(self) -> None:
+        _atomic_write(
+            self._concepts_path,
+            json.dumps([c.model_dump(mode="json") for c in self._concepts.values()], indent=2),
+        )
+
     # Directives ----------------------------------------------------------------------
 
     def add_directive(self, text: str) -> Directive:
@@ -452,6 +620,10 @@ class Project:
 def _format_source(source: Source) -> str:
     extra = f", duplicate of `{source.duplicate_of}`" if source.duplicate_of else ""
     return f"- `{source.id}` [{source.title}]({source.url}) ({source.tier}{extra})"
+
+
+def _union(first: Sequence[str], second: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys([*first, *second]))
 
 
 def _slugify(text: str, max_length: int = 60) -> str:

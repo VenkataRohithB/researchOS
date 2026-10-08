@@ -27,7 +27,7 @@ def test_state_and_transcript_are_persisted(tmp_path: Path) -> None:
     assert state.agenda[0].text == "Understand the basics of test topic"
     assert state.agenda[0].status == "done"
     assert state.summary == "Mock research on 'test topic' complete."
-    assert state.runs[0].usage is not None and state.runs[0].usage.llm_calls == 7
+    assert state.runs[0].usage is not None and state.runs[0].usage.llm_calls == 8
     assert len(Transcript(project.transcript_path)) == 7
 
 
